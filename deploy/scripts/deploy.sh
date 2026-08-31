@@ -21,6 +21,7 @@ echo "==> 대상: ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}"
 
 echo "==> 코드 동기화 (rsync)"
 rsync -az --delete --human-readable \
+  --no-owner --no-group \
   --exclude '.git' \
   --exclude '.github' \
   --exclude '.env' \

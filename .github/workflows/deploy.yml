@@ -69,9 +69,11 @@ jobs:
           ssh ${SSH_OPTS} "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "hostname && test -d '${DEPLOY_PATH}' || { echo '배포 경로 없음: ${DEPLOY_PATH}' >&2; exit 1; }"
 
+      # --no-owner/--no-group: 러너의 uid(1001)가 서버 파일 소유권을 덮어쓰지 않도록 한다.
       - name: 코드 동기화 (rsync)
         run: |
           rsync -az --delete --human-readable \
+            --no-owner --no-group \
             --exclude '.git' \
             --exclude '.github' \
             --exclude '.env' \
