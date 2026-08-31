@@ -1,10 +1,10 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  # Deploy 워크플로에서 재사용(main 푸시 시 Deploy가 이 워크플로를 먼저 호출)
+  workflow_call:
 
 jobs:
   python-tests:

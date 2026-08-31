@@ -1,26 +1,47 @@
 #!/usr/bin/env bash
-# 서버 배포 스크립트 템플릿 (서버가 정해지면 SSH 접속 정보/경로를 채워서 사용)
-# 사용법: ./deploy/scripts/deploy.sh
+# 수동 배포 스크립트 (자동 배포는 .github/workflows/deploy.yml 이 담당).
+# 로컬 작업 트리를 그대로 서버에 밀어넣으므로, 평소에는 main 브랜치 푸시로 배포하세요.
+#
+# 사용법:
+#   ./deploy/scripts/deploy.sh
+#   DEPLOY_USER=ubuntu DEPLOY_PATH=/srv/ai-trading ./deploy/scripts/deploy.sh
 set -euo pipefail
 
-REMOTE_HOST="REPLACE_WITH_SERVER_HOST"
-REMOTE_USER="REPLACE_WITH_DEPLOY_USER"
-REMOTE_PATH="/var/www/ai-trading"
+DEPLOY_HOST="${DEPLOY_HOST:-upsignal.mycafe24.com}"
+DEPLOY_USER="${DEPLOY_USER:-root}"
+DEPLOY_PORT="${DEPLOY_PORT:-22}"
+DEPLOY_PATH="${DEPLOY_PATH:-/var/www/traders}"
 
-echo "==> 코드 동기화"
-rsync -az --exclude-from='.gitignore' --exclude '.git' ./ "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
 
-echo "==> 원격 서버에서 의존성 설치 및 서비스 재시작"
-ssh "${REMOTE_USER}@${REMOTE_HOST}" bash -s <<'EOF'
-set -euo pipefail
-cd /var/www/ai-trading
-composer install --no-interaction --no-dev --optimize-autoloader -d api
-source trading_engine/venv/bin/activate
-pip install -r trading_engine/requirements.txt
-deactivate
-sudo systemctl restart ai-trading-engine
-sudo systemctl restart ai-trading-scheduler
-sudo systemctl reload php-fpm
-EOF
+SSH_OPTS="-p ${DEPLOY_PORT}"
+
+echo "==> 대상: ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}"
+
+echo "==> 코드 동기화 (rsync)"
+rsync -az --delete --human-readable \
+  --exclude '.git' \
+  --exclude '.github' \
+  --exclude '.env' \
+  --exclude '.env.local' \
+  --exclude 'docker-compose.override.yml' \
+  --exclude 'api/vendor' \
+  --exclude 'trading_engine/venv' \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  --exclude '.pytest_cache' \
+  --exclude 'logs' \
+  --exclude '*.log' \
+  --exclude 'mysql-data' \
+  --exclude 'redis-data' \
+  --exclude '.DS_Store' \
+  -e "ssh ${SSH_OPTS}" \
+  ./ "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
+
+echo "==> 원격 배포 스크립트 실행"
+# shellcheck disable=SC2029
+ssh ${SSH_OPTS} "${DEPLOY_USER}@${DEPLOY_HOST}" \
+  "DEPLOY_PATH='${DEPLOY_PATH}' bash '${DEPLOY_PATH}/deploy/scripts/remote_deploy.sh'"
 
 echo "==> 배포 완료"

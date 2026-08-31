@@ -1469,15 +1469,22 @@ docker compose up -d mysql redis
 cd trading_engine && ./venv/bin/python main.py
 ```
 
-### 배포 사전 작업 (서버 확정 후)
+### 배포 (운영 서버)
 
-서버(예: AWS/NCP/자체 서버)가 정해지면 아래 순서로 진행합니다.
+운영 서버는 **upsignal.mycafe24.com** (Ubuntu + Apache 2.4 + PHP 8.3 + Python 3.12, 네이티브 구성)입니다.
 
-1. `deploy/nginx/ai-trading.conf`의 도메인/경로를 채워 Nginx에 반영하고 HTTPS(Let's Encrypt) 설정
-2. `deploy/systemd/ai-trading-engine.service`, `ai-trading-scheduler.service`를 서버의 `/etc/systemd/system/`에 배치 후 `systemctl enable --now`
-3. 서버에도 동일하게 `.env` 구성 (Upbit API 키는 반드시 서버 고정 IP 화이트리스트 + 출금 권한 제외)
-4. `api/Dockerfile`(php-fpm) 기반으로 운영 컨테이너 빌드 또는 `deploy/scripts/deploy.sh`로 rsync + systemd 재시작 방식 배포
-5. `.github/workflows/ci.yml`에 배포 job을 추가해 push 시 자동 배포로 확장 가능
+`main` 브랜치에 푸시하면 [.github/workflows/deploy.yml](.github/workflows/deploy.yml)이
+**테스트 → rsync 동기화 → 의존성 설치 → 서비스 재시작 → 헬스체크** 순으로 자동 배포합니다.
 
-> `deploy/scripts/deploy.sh`와 systemd 유닛의 `REPLACE_WITH_*` 값은 서버 확정 후 실제 값으로 교체해야 합니다.
+```
+push to main → ci(pytest/composer) → rsync → remote_deploy.sh → https://upsignal.mycafe24.com/ 200 확인
+```
+
+- 1회 설정(SSH 키, GitHub Secrets, sudoers, systemd 등록): **[deploy/README.md](deploy/README.md)**
+- 수동 배포가 필요하면 `./deploy/scripts/deploy.sh`
+- 서버 후처리 로직은 `deploy/scripts/remote_deploy.sh` 한 곳에 모여 있습니다 (자동/수동 배포 공용)
+
+> `.env`, `api/vendor`, `trading_engine/venv` 는 rsync 제외 대상이라 서버 파일이 그대로 유지됩니다.
+> 특히 `.env`는 서버에 직접 만들어야 하며(Upbit 키는 고정 IP 화이트리스트 + 출금 권한 제외), 없으면 배포가 중단됩니다.
+> `deploy/nginx/ai-trading.conf`는 Nginx용 참고 템플릿이며 현재 운영 서버는 Apache로 동작합니다.
 

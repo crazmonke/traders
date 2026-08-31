@@ -1,0 +1,121 @@
+# 자동 배포 (main 푸시 → upsignal.mycafe24.com)
+
+`main` 브랜치에 푸시하면 GitHub Actions가 **테스트 → rsync 동기화 → 의존성 설치 → 서비스 재시작 → 헬스체크** 순서로 운영 서버에 배포합니다.
+
+## 실제 운영 환경 (2026-08-31 확인)
+
+| 항목 | 값 |
+| --- | --- |
+| 호스트 | `upsignal.mycafe24.com` (104.105.137.245), SSH 22 |
+| OS | Ubuntu 24.04.4 LTS |
+| 배포 계정 | `root` (키 인증, 비밀번호 아님) |
+| 배포 경로 | `/var/www/traders` |
+| 웹서버 | Apache 2.4.58, DocumentRoot `/var/www/traders/api/public` |
+| HTTPS | Let's Encrypt (`upsignal.mycafe24.com`) |
+| 런타임 | PHP 8.3.6 / Composer 2.10.3 / Python 3.12.3 |
+| DB | MariaDB (`systemctl is-active mariadb` = active) |
+| Redis | **미설치** |
+| 방화벽 | ufw active (OpenSSH, 80, 443 허용) + fail2ban(sshd jail) |
+
+## 파이프라인
+
+```
+push to main
+  └─ ci  (.github/workflows/ci.yml 재사용: pytest + composer install)
+       └─ deploy
+            1. SSH 키 구성 (secrets.DEPLOY_SSH_KEY)
+            2. rsync -az --delete  ./ → /var/www/traders
+               (.env / api/vendor / trading_engine/venv / .git 은 서버 것 유지)
+            3. deploy/scripts/remote_deploy.sh
+               - composer install --no-dev -o
+               - venv 생성 + pip install -r requirements.txt
+               - systemctl restart ai-trading-engine / ai-trading-scheduler (등록된 경우만)
+               - systemctl reload php*-fpm / apache2
+            4. https://upsignal.mycafe24.com/ 헬스체크 (HTTP 200, 최대 10회 재시도)
+```
+
+테스트가 실패하면 배포되지 않습니다. 긴급 배포는 Actions 탭 → **Deploy** → *Run workflow* → `skip_tests` 체크.
+
+## 설정 상태
+
+이미 완료된 항목:
+
+- [x] 배포용 키페어 생성 — `~/.ssh/upsignal_deploy` / `.pub`
+- [x] 서버 `/root/.ssh/authorized_keys` 에 공개키 등록 (`ssh-copy-id`)
+- [x] GitHub Secret `DEPLOY_SSH_KEY` (개인키)
+- [x] GitHub Secret `DEPLOY_KNOWN_HOSTS` (호스트 키 고정)
+- [x] 워크플로 기본값을 실제 환경(`root`, `/var/www/traders`)에 맞춤
+
+기본값과 다르게 쓰고 싶을 때만 `Settings → Secrets and variables → Actions → Variables` 에 추가:
+
+| 이름 | 기본값 |
+| --- | --- |
+| `DEPLOY_HOST` | `upsignal.mycafe24.com` |
+| `DEPLOY_USER` | `root` |
+| `DEPLOY_PORT` | `22` |
+| `DEPLOY_PATH` | `/var/www/traders` |
+| `DEPLOY_HEALTH_URL` | `https://upsignal.mycafe24.com/` |
+
+## 남은 작업 (배포 파이프라인과 별개, 앱 동작에 필요)
+
+서버 `/var/www/traders/.env` 가 아직 로컬/Docker 템플릿 상태입니다. Docker가 아니라 네이티브 구성이므로 아래 값을 고쳐야 앱이 DB에 붙습니다.
+
+| 키 | 현재 | 필요한 값 |
+| --- | --- | --- |
+| `APP_ENV` | `local` | `production` |
+| `DB_HOST` | `mysql` | `127.0.0.1` |
+| `REDIS_HOST` | `redis` | `127.0.0.1` (Redis 설치 후) |
+| `APP_URL` | `http://localhost:8080` | `https://upsignal.mycafe24.com` |
+
+그리고 Redis가 미설치입니다. 필요하면:
+
+```bash
+apt-get update && apt-get install -y redis-server
+systemctl enable --now redis-server
+```
+
+Python 엔진/스케줄러를 상시 구동하려면 systemd 유닛 등록:
+
+```bash
+cp /var/www/traders/deploy/systemd/ai-trading-*.service /etc/systemd/system/
+sed -i 's/REPLACE_WITH_DEPLOY_USER/root/' /etc/systemd/system/ai-trading-*.service
+sed -i 's#/var/www/ai-trading#/var/www/traders#g' /etc/systemd/system/ai-trading-*.service
+systemctl daemon-reload
+systemctl enable --now ai-trading-engine ai-trading-scheduler
+```
+
+> 등록 전까지는 배포 스크립트가 "미등록 - 건너뜁니다" 경고만 남기고 정상 진행합니다.
+
+## rsync 동기화 규칙
+
+`--delete`로 서버를 저장소 상태에 맞춰 미러링하되, 아래는 제외되어 **서버 파일이 보존**됩니다.
+
+```
+.git  .github  .env  .env.local  docker-compose.override.yml
+api/vendor  trading_engine/venv  __pycache__  *.pyc  .pytest_cache
+logs  *.log  mysql-data  redis-data  .DS_Store
+```
+
+서버에만 두는 파일은 이 목록에 추가해야 배포 때 삭제되지 않습니다.
+
+## fail2ban 주의
+
+sshd jail이 켜져 있어 **비밀번호/키 인증에 여러 번 실패하면 해당 IP가 약 10분간 차단**됩니다(웹은 정상, 22번 포트만 거부). 사무실 고정 IP를 예외로 등록하려면 서버에서:
+
+```bash
+printf '[DEFAULT]\nignoreip = 127.0.0.1/8 ::1 14.47.47.47\n' > /etc/fail2ban/jail.d/ignoreip.local
+fail2ban-client set sshd unbanip 14.47.47.47
+fail2ban-client reload
+```
+
+GitHub Actions 러너는 등록된 키로 첫 시도에 성공하므로 차단 대상이 되지 않습니다.
+
+## 문제 해결
+
+| 증상 | 원인/조치 |
+| --- | --- |
+| `Permission denied (publickey)` | 서버 `/root/.ssh/authorized_keys` 확인, `DEPLOY_USER` 변수 확인 |
+| `Connection refused` (22번) | fail2ban 차단 — 위 섹션 참고, 약 10분 후 자동 해제 |
+| `test -d '/var/www/traders'` 실패 | 경로 확인 또는 `DEPLOY_PATH` 변수 수정 |
+| `.env 가 없습니다` | 서버 `/var/www/traders/.env` 생성 |
+| 헬스체크 실패 | `tail -50 /var/log/apache2/error.log`, `journalctl -u ai-trading-engine -n 50` |

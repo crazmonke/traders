@@ -1,0 +1,123 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "테스트를 건너뛰고 즉시 배포"
+        type: boolean
+        default: false
+
+# 동시에 두 배포가 겹치지 않도록 직렬화 (진행 중인 배포는 취소하지 않음)
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    if: ${{ !inputs.skip_tests }}
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: [ci]
+    # ci가 skip 되어도(수동 배포) 실행, 단 실패했을 때는 실행하지 않음
+    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || 'upsignal.mycafe24.com' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/var/www/traders' }}
+      HEALTH_URL: ${{ vars.DEPLOY_HEALTH_URL || 'https://upsignal.mycafe24.com/' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 시크릿 사전 점검
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "${DEPLOY_SSH_KEY}" ]; then
+            echo "::error::secrets.DEPLOY_SSH_KEY 가 비어 있습니다. deploy/README.md의 1회 설정을 먼저 진행하세요."
+            exit 1
+          fi
+          echo "대상: ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PORT}${DEPLOY_PATH}"
+
+      - name: SSH 키/known_hosts 설정
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if [ -n "${DEPLOY_KNOWN_HOSTS}" ]; then
+            printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          else
+            # DEPLOY_KNOWN_HOSTS 시크릿이 없으면 TOFU 방식으로 호스트 키를 수집한다.
+            ssh-keyscan -p "${DEPLOY_PORT}" -H "${DEPLOY_HOST}" > ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+          echo "SSH_OPTS=-i $HOME/.ssh/id_deploy -p ${DEPLOY_PORT} -o StrictHostKeyChecking=yes -o BatchMode=yes" >> "$GITHUB_ENV"
+
+      - name: 접속 확인
+        run: |
+          ssh ${SSH_OPTS} "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "hostname && test -d '${DEPLOY_PATH}' || { echo '배포 경로 없음: ${DEPLOY_PATH}' >&2; exit 1; }"
+
+      - name: 코드 동기화 (rsync)
+        run: |
+          rsync -az --delete --human-readable \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.env' \
+            --exclude '.env.local' \
+            --exclude 'docker-compose.override.yml' \
+            --exclude 'api/vendor' \
+            --exclude 'trading_engine/venv' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude '.pytest_cache' \
+            --exclude 'logs' \
+            --exclude '*.log' \
+            --exclude 'mysql-data' \
+            --exclude 'redis-data' \
+            --exclude '.DS_Store' \
+            -e "ssh ${SSH_OPTS}" \
+            ./ "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
+
+      - name: 원격 배포 스크립트 실행
+        run: |
+          ssh ${SSH_OPTS} "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "DEPLOY_PATH='${DEPLOY_PATH}' bash '${DEPLOY_PATH}/deploy/scripts/remote_deploy.sh'"
+
+      - name: 헬스체크
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -sS -o /tmp/health.out -w '%{http_code}' --max-time 10 "${HEALTH_URL}" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "헬스체크 성공 (HTTP 200)"
+              head -c 500 /tmp/health.out; echo
+              exit 0
+            fi
+            echo "재시도 ${i}/10 (HTTP ${code})"
+            sleep 5
+          done
+          echo "::error::헬스체크 실패 - ${HEALTH_URL}"
+          head -c 500 /tmp/health.out || true
+          exit 1
+
+      - name: 배포 요약
+        if: always()
+        run: |
+          {
+            echo "### 배포 결과: ${{ job.status }}"
+            echo ""
+            echo "- 커밋: \`${GITHUB_SHA::7}\`"
+            echo "- 대상: \`${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}\`"
+            echo "- 헬스체크: ${HEALTH_URL}"
+          } >> "$GITHUB_STEP_SUMMARY"
