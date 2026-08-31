@@ -1,0 +1,24 @@
+# 프론트 컨트롤러 라우팅.
+# vhost가 AllowOverride All 이므로 이 파일이 적용된다.
+# 저장소로 관리되므로 배포하면 서버에 그대로 반영된다.
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # 실제로 존재하는 파일/디렉토리는 그대로 서빙한다.
+    # (정적 페이지, 이미지, CSS, JS 등)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # 그 외 모든 요청은 프론트 컨트롤러로 넘긴다.
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+# 디렉토리 목록 노출 금지
+Options -Indexes
+
+# 숨김 파일(.env, .git 등) 접근 차단
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>

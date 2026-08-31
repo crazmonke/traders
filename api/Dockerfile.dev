@@ -10,4 +10,5 @@ RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local
 RUN composer install --no-interaction --optimize-autoloader || true
 
 EXPOSE 8080
-CMD ["php", "-S", "0.0.0.0:8080", "-t", "public"]
+# index.php 를 라우터로 지정해 Apache(.htaccess) 와 동일한 라우팅을 재현한다.
+CMD ["php", "-S", "0.0.0.0:8080", "-t", "public", "public/index.php"]

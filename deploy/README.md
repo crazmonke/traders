@@ -32,7 +32,8 @@ push to main
                - venv 생성 + pip install -r requirements.txt
                - systemctl restart ai-trading-engine / ai-trading-scheduler (등록된 경우만)
                - systemctl reload php*-fpm / apache2
-            4. https://upsignal.mycafe24.com/ 헬스체크 (HTTP 200, 최대 10회 재시도)
+            4. https://upsignal.mycafe24.com/api/health 헬스체크
+               (HTTP 200 + status=ok, DB·Redis 연결까지 검사, 최대 10회 재시도)
 ```
 
 테스트가 실패하면 배포되지 않습니다. 긴급 배포는 Actions 탭 → **Deploy** → *Run workflow* → `skip_tests` 체크.
@@ -55,7 +56,7 @@ push to main
 | `DEPLOY_USER` | `root` |
 | `DEPLOY_PORT` | `22` |
 | `DEPLOY_PATH` | `/var/www/traders` |
-| `DEPLOY_HEALTH_URL` | `https://upsignal.mycafe24.com/` |
+| `DEPLOY_HEALTH_URL` | `https://upsignal.mycafe24.com/api/health` |
 
 ## 남은 작업 (배포 파이프라인과 별개, 앱 동작에 필요)
 
@@ -137,4 +138,4 @@ GitHub Actions 러너는 등록된 키로 첫 시도에 성공하므로 차단 �
 | `Connection refused` (22번) | fail2ban 차단 — 위 섹션 참고, 약 10분 후 자동 해제 |
 | `test -d '/var/www/traders'` 실패 | 경로 확인 또는 `DEPLOY_PATH` 변수 수정 |
 | `.env 가 없습니다` | 서버 `/var/www/traders/.env` 생성 |
-| 헬스체크 실패 | `tail -50 /var/log/apache2/error.log`, `journalctl -u ai-trading-engine -n 50` |
+| 헬스체크 실패 | `curl https://upsignal.mycafe24.com/api/health` 로 어느 검사가 깨졌는지 확인 후<br>`tail -50 /var/log/apache2/ai-trading-error.log` |

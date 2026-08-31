@@ -1,0 +1,77 @@
+/* 정적 자산 서빙이 정상 동작하는지 확인하는 용도이자, 앞으로의 공통 스타일 기반. */
+
+:root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --ok: #059669;
+    --card: #f9fafb;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0f1115;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --border: #2a2e35;
+        --accent: #60a5fa;
+        --ok: #34d399;
+        --card: #171a20;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    padding: 3rem 1.25rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", sans-serif;
+}
+
+main { max-width: 44rem; margin: 0 auto; }
+
+h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
+
+.sub { color: var(--muted); margin: 0 0 2rem; }
+
+.badge {
+    display: inline-block;
+    padding: .15rem .55rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--ok) 15%, transparent);
+    color: var(--ok);
+    font-size: .8rem;
+    font-weight: 600;
+}
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: .6rem;
+    padding: 1rem 1.25rem;
+    margin-bottom: .75rem;
+}
+
+.card h2 { font-size: .95rem; margin: 0 0 .5rem; }
+
+code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .875em;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    padding: .1rem .35rem;
+    border-radius: .25rem;
+}
+
+a { color: var(--accent); }
+
+footer {
+    margin-top: 2.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: .85rem;
+}

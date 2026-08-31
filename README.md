@@ -1469,6 +1469,55 @@ docker compose up -d mysql redis
 cd trading_engine && ./venv/bin/python main.py
 ```
 
+### 웹 소스 위치와 라우팅
+
+PHP 소스는 전부 `api/` 아래에 두고, 커밋 후 `main` 에 푸시하면 서버의 `/var/www/traders/api/` 로 자동 배포됩니다.
+**서버에서 직접 수정하지 마세요** — rsync 미러링이라 다음 배포 때 되돌아갑니다.
+
+| 위치 | 용도 | 웹 노출 | git |
+| --- | --- | --- | --- |
+| `api/public/` | DocumentRoot. 정적 페이지 · 자산 · 프론트 컨트롤러(`index.php`) | 전부 URL 로 노출 | 추적 |
+| `api/src/` | 실제 PHP 로직. `App\` 네임스페이스(PSR-4) | 직접 접근 불가 | 추적 |
+| `api/config/`, `api/database/` | 설정 · 마이그레이션 | 직접 접근 불가 | 추적 |
+| `api/vendor/` | composer 설치물 | 직접 접근 불가 | 미추적(배포 시 서버에서 생성) |
+
+`composer.json` 의 `"App\": "src/"` 매핑 덕분에 `api/src/` 아래 새 디렉토리를 만들어도 설정 수정 없이 오토로딩됩니다.
+`api/src/Controller/SignalController.php` → `App\Controller\SignalController`.
+
+> **`api/public/` 에는 PHP 로직을 두지 마세요.** 여기 있는 파일은 전부 브라우저에서 직접 열립니다.
+> 진입점 `index.php` 와 정적 파일만 두고, 로직은 `api/src/` 에 둡니다.
+
+라우팅은 `api/public/.htaccess` 가 담당합니다. 존재하는 파일·디렉토리는 그대로 서빙하고,
+나머지 요청은 전부 `index.php` 로 넘깁니다.
+
+```
+/                    → api/public/index.html      (정적)
+/assets/style.css    → api/public/assets/style.css (정적)
+/api/health          → index.php → App\Http\Health  (JSON, DB·Redis 검사)
+/api/<없는 경로>       → index.php                   (JSON 404)
+/<없는 경로>           → index.php                   (HTML 404, api/public/404.html)
+```
+
+`/api/health` 는 DB·Redis 연결을 검사해 정상이면 `200 {"status":"ok"}`, 하나라도 끊기면 `503` 을 반환합니다.
+배포 파이프라인이 이 응답으로 배포 성공 여부를 판정하므로, 연결이 깨진 채로 배포가 통과하지 않습니다.
+
+### 로컬 미리보기
+
+배포 전에 로컬에서 그대로 확인할 수 있습니다. Apache 와 동일한 라우팅을 재현합니다.
+
+```bash
+composer serve --working-dir=api      # http://127.0.0.1:8080
+```
+
+Docker 로 띄워도 동일합니다.
+
+```bash
+docker compose up -d php-api          # http://localhost:8080
+```
+
+`.env` 의 `DB_HOST`/`REDIS_HOST` 가 로컬 기준(`mysql`/`redis` 또는 `127.0.0.1`)으로 맞지 않으면
+`/api/health` 는 `503` 을 반환합니다. 정적 페이지와 라우팅 확인에는 지장이 없습니다.
+
 ### 배포 (운영 서버)
 
 운영 서버는 **upsignal.mycafe24.com** (Ubuntu 24.04)이며, **호스트 네이티브 + Docker 하이브리드** 구성입니다.

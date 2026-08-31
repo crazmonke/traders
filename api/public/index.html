@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex">
+    <title>UpSignal API</title>
+    <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<main>
+    <h1>UpSignal <span class="badge">running</span></h1>
+    <p class="sub">AI 트레이딩 플랫폼 API 서버</p>
+
+    <div class="card">
+        <h2>상태 확인</h2>
+        <p><a href="/api/health">/api/health</a> — DB / Redis 연결 상태를 JSON 으로 반환합니다.</p>
+    </div>
+
+    <div class="card">
+        <h2>정적 페이지</h2>
+        <p>
+            이 페이지는 <code>api/public/index.html</code> 입니다.
+            <code>api/public/</code> 아래 파일은 URL 로 그대로 노출되며,
+            그 외 경로는 <code>index.php</code> 프론트 컨트롤러가 처리합니다.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>API</h2>
+        <p><code>/api/*</code> 경로는 JSON 으로 응답합니다. Step 5 엔드포인트는 순차적으로 추가됩니다.</p>
+    </div>
+
+    <footer>
+        저장소에 커밋 후 <code>main</code> 브랜치에 푸시하면 자동 배포됩니다.
+    </footer>
+</main>
+</body>
+</html>

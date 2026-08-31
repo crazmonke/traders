@@ -15,5 +15,11 @@
     },
     "config": {
         "optimize-autoloader": true
+    },
+    "scripts": {
+        "serve": "php -S 127.0.0.1:8080 -t public public/index.php"
+    },
+    "scripts-descriptions": {
+        "serve": "로컬 미리보기 서버 (http://127.0.0.1:8080)"
     }
 }
