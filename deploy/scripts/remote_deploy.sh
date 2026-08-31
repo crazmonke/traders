@@ -46,9 +46,23 @@ else
   warn "composer 를 찾을 수 없어 PHP 의존성 설치를 건너뜁니다 (기존 api/vendor 유지)."
 fi
 
-# --------------------------------------------------------- Python 의존성
+# ------------------------------------------------ Python 엔진 (Docker 우선)
+# 이 서버는 하이브리드 구성이다. Python 엔진이 Docker 컨테이너로 돌고 있으면
+# 코드는 볼륨 마운트로 이미 갱신되므로 컨테이너만 재기동하면 되고,
+# 호스트 venv는 필요 없다. 컨테이너가 없을 때만 venv 경로로 폴백한다.
 PY_DIR="$APP_DIR/trading_engine"
-if [ -f "$PY_DIR/requirements.txt" ]; then
+ENGINE_IN_DOCKER=0
+
+if command -v docker >/dev/null 2>&1 && [ -f "$APP_DIR/docker-compose.yml" ]; then
+  # status=running 필터는 재시작 중(Restarting) 컨테이너를 놓치므로 필터 없이 존재 여부로 판정한다.
+  if (cd "$APP_DIR" && docker compose ps --services 2>/dev/null) | grep -qx "python-engine"; then
+    ENGINE_IN_DOCKER=1
+    log "python-engine 컨테이너 재기동 (새 코드 반영)"
+    (cd "$APP_DIR" && docker compose up -d python-engine)
+  fi
+fi
+
+if [ "$ENGINE_IN_DOCKER" -eq 0 ] && [ -f "$PY_DIR/requirements.txt" ]; then
   if [ ! -x "$PY_DIR/venv/bin/python" ]; then
     log "Python 가상환경 생성"
     python3 -m venv "$PY_DIR/venv"

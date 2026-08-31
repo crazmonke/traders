@@ -13,8 +13,9 @@
 | 웹서버 | Apache 2.4.58, DocumentRoot `/var/www/traders/api/public` |
 | HTTPS | Let's Encrypt (`upsignal.mycafe24.com`) |
 | 런타임 | PHP 8.3.6 / Composer 2.10.3 / Python 3.12.3 |
-| DB | MariaDB (`systemctl is-active mariadb` = active) |
-| Redis | **미설치** |
+| DB | MariaDB 호스트 네이티브 (`127.0.0.1:3306`, 외부 미개방) |
+| Redis | **Docker 컨테이너** `traders-redis-1` (`redis:7-alpine`, 6379 퍼블리시) |
+| Python 엔진 | Docker 컨테이너 `traders-python-engine-1` |
 | 방화벽 | ufw active (OpenSSH, 80, 443 허용) + fail2ban(sshd jail) |
 
 ## 파이프라인
@@ -64,14 +65,32 @@ push to main
 | --- | --- | --- |
 | `APP_ENV` | `local` | `production` |
 | `DB_HOST` | `mysql` | `127.0.0.1` |
-| `REDIS_HOST` | `redis` | `127.0.0.1` (Redis 설치 후) |
+| `REDIS_HOST` | `redis` | `127.0.0.1` |
 | `APP_URL` | `http://localhost:8080` | `https://upsignal.mycafe24.com` |
+| `JWT_SECRET` | `change_me_...` | `openssl rand -hex 32` 결과 |
 
-그리고 Redis가 미설치입니다. 필요하면:
+위 값은 **호스트(Apache/PHP) 기준**입니다. 컨테이너에서 도는 Python 엔진은 같은 값으로 붙을 수 없으므로
+`docker-compose.override.yml` 에서 컨테이너 기준 값으로 덮어써야 합니다.
+
+```yaml
+services:
+  python-engine:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DB_HOST: host.docker.internal
+      REDIS_HOST: redis          # 없으면 컨테이너가 .env의 127.0.0.1을 읽어 실패
+```
+
+### Redis — 호스트에 설치하지 마세요
+
+Redis는 기획상 필수(캐싱 + `channel:signals` Pub/Sub)이며, **이미 Docker 컨테이너로 동작 중**입니다.
+`apt install redis-server` 로 호스트에 또 설치하면 컨테이너가 점유한 6379 포트와 충돌해 기동에 실패합니다.
+(php-redis 확장 설치 시 의존 패키지로 딸려 들어오는 경우가 있습니다.)
 
 ```bash
-apt-get update && apt-get install -y redis-server
-systemctl enable --now redis-server
+systemctl disable --now redis-server   # 호스트 여분 설치본 정리
+redis-cli ping                          # PONG → 컨테이너 Redis 정상
 ```
 
 Python 엔진/스케줄러를 상시 구동하려면 systemd 유닛 등록:
@@ -91,7 +110,7 @@ systemctl enable --now ai-trading-engine ai-trading-scheduler
 `--delete`로 서버를 저장소 상태에 맞춰 미러링하되, 아래는 제외되어 **서버 파일이 보존**됩니다.
 
 ```
-.git  .github  .env  .env.local  docker-compose.override.yml
+.git  .github  .env  .env.local  .env.bak.*  docker-compose.override.yml
 api/vendor  trading_engine/venv  __pycache__  *.pyc  .pytest_cache
 logs  *.log  mysql-data  redis-data  .DS_Store
 ```

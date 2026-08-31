@@ -25,6 +25,7 @@ rsync -az --delete --human-readable \
   --exclude '.github' \
   --exclude '.env' \
   --exclude '.env.local' \
+  --exclude '.env.bak.*' \
   --exclude 'docker-compose.override.yml' \
   --exclude 'api/vendor' \
   --exclude 'trading_engine/venv' \

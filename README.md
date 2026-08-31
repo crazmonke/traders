@@ -1471,7 +1471,7 @@ cd trading_engine && ./venv/bin/python main.py
 
 ### 배포 (운영 서버)
 
-운영 서버는 **upsignal.mycafe24.com** (Ubuntu + Apache 2.4 + PHP 8.3 + Python 3.12, 네이티브 구성)입니다.
+운영 서버는 **upsignal.mycafe24.com** (Ubuntu 24.04)이며, **호스트 네이티브 + Docker 하이브리드** 구성입니다.
 
 `main` 브랜치에 푸시하면 [.github/workflows/deploy.yml](.github/workflows/deploy.yml)이
 **테스트 → rsync 동기화 → 의존성 설치 → 서비스 재시작 → 헬스체크** 순으로 자동 배포합니다.
@@ -1484,7 +1484,61 @@ push to main → ci(pytest/composer) → rsync → remote_deploy.sh → https://
 - 수동 배포가 필요하면 `./deploy/scripts/deploy.sh`
 - 서버 후처리 로직은 `deploy/scripts/remote_deploy.sh` 한 곳에 모여 있습니다 (자동/수동 배포 공용)
 
-> `.env`, `api/vendor`, `trading_engine/venv` 는 rsync 제외 대상이라 서버 파일이 그대로 유지됩니다.
+> `.env`(백업 포함), `api/vendor`, `trading_engine/venv`, `docker-compose.override.yml` 은 rsync 제외 대상이라 서버 파일이 그대로 유지됩니다.
 > 특히 `.env`는 서버에 직접 만들어야 하며(Upbit 키는 고정 IP 화이트리스트 + 출금 권한 제외), 없으면 배포가 중단됩니다.
 > `deploy/nginx/ai-trading.conf`는 Nginx용 참고 템플릿이며 현재 운영 서버는 Apache로 동작합니다.
+
+#### 운영 서버 런타임 구성
+
+전부 Docker도 아니고 전부 네이티브도 아닙니다. 컴포넌트마다 실행 형태가 다르므로 **호스트에서 접근하느냐 컨테이너에서 접근하느냐에 따라 호스트명이 달라집니다.**
+
+| 컴포넌트 | 실행 형태 | 호스트에서 | 컨테이너에서 |
+| --- | --- | --- | --- |
+| PHP API | 호스트 Apache 2.4 + PHP 8.3<br>DocumentRoot `/var/www/traders/api/public` | — | — |
+| MariaDB | 호스트 네이티브 (`127.0.0.1:3306`, 외부 미개방) | `127.0.0.1` | `host.docker.internal` |
+| Redis | **Docker 컨테이너** `traders-redis-1` (`redis:7-alpine`)<br>`0.0.0.0:6379` 퍼블리시 | `127.0.0.1` | `redis` |
+| Python 매매 엔진 | Docker 컨테이너 `traders-python-engine-1` | — | — |
+
+#### Redis는 Docker 컨테이너를 사용합니다 (호스트에 설치 금지)
+
+Redis는 기획상 **필수 컴포넌트**입니다. `market:KRW-BTC:ticker` / `orderbook` / `candles:5m` 캐싱과
+시그널 Pub/Sub 채널(`channel:signals`)이 모두 Redis 위에서 동작합니다.
+
+다만 **호스트에 `apt install redis-server` 로 별도 설치하면 안 됩니다.**
+`docker-compose.yml`의 `redis:7-alpine` 컨테이너가 이미 6379 포트를 점유하고 있어서,
+호스트 패키지는 포트 충돌로 기동에 실패합니다. (php-redis 확장을 설치할 때 의존 패키지로 딸려 들어오는 경우가 있습니다.)
+
+호스트 패키지가 깔려 있다면 비활성화만 해두면 됩니다. 컨테이너 Redis가 계속 서비스합니다.
+
+```bash
+systemctl disable --now redis-server   # 호스트 여분 설치본 정리
+redis-cli ping                          # PONG → 컨테이너 Redis 정상
+```
+
+> 정리: "Redis를 안 써도 되는 것"이 아니라 **"Redis는 Docker로 이미 쓰고 있고, 호스트용 여분 설치본이 불필요하게 하나 더 깔려 있던 것"** 입니다.
+
+#### `.env`의 호스트명 주의
+
+`.env`는 호스트 PHP API와 컨테이너 Python 엔진이 함께 읽지만, 같은 값이 양쪽에서 통하지 않습니다.
+**`.env`에는 호스트 기준 값**을 넣고, **컨테이너 기준 값은 `docker-compose.override.yml`에서 덮어씁니다.**
+
+```bash
+# .env - 호스트(Apache/PHP) 기준
+DB_HOST=127.0.0.1
+REDIS_HOST=127.0.0.1
+```
+
+```yaml
+# docker-compose.override.yml - 컨테이너(python-engine) 기준으로 덮어쓰기
+services:
+  python-engine:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DB_HOST: host.docker.internal
+      REDIS_HOST: redis
+```
+
+`REDIS_HOST`를 override에 넣지 않으면 컨테이너가 `.env`의 `127.0.0.1`을 그대로 읽어
+자기 자신에게 붙으려다 실패합니다.
 
