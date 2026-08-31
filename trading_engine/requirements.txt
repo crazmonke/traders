@@ -1,0 +1,14 @@
+websockets==12.0
+aiohttp==3.9.5
+pandas>=2.2.2
+pandas-ta==0.4.71b0
+redis==5.0.4
+PyMySQL==1.1.1
+SQLAlchemy==2.0.30
+openai==1.35.10
+pydantic==2.7.4
+python-dotenv==1.0.1
+tenacity==8.4.2
+apscheduler==3.10.4
+pytest==8.2.2
+pytest-asyncio==0.23.7

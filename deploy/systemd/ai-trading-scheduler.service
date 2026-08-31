@@ -1,0 +1,16 @@
+# 시그널 성과 추적 스케줄러(Step 6) 상시 구동용 systemd 유닛 템플릿
+[Unit]
+Description=AI Trading Signal Result Tracker Scheduler
+After=network.target mysql.service redis-server.service
+
+[Service]
+Type=simple
+User=REPLACE_WITH_DEPLOY_USER
+WorkingDirectory=/var/www/ai-trading/trading_engine
+EnvironmentFile=/var/www/ai-trading/.env
+ExecStart=/var/www/ai-trading/trading_engine/venv/bin/python -m database.result_tracker_scheduler
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

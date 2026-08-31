@@ -1407,3 +1407,77 @@ Signal 발생 횟수
 [4]: https://developers.openai.com/api/docs/models/gpt-5.6-luna?utm_source=chatgpt.com "GPT-5.6 Luna Model | OpenAI API"
 [5]: https://docs.upbit.com/kr/kr/page/?utm_source=chatgpt.com "New Page"
 [6]: https://developer.apple.com/app-store/review/guidelines/?utm_source=chatgpt.com "App Review Guidelines - Apple Developer"
+
+---
+
+## 로컬 개발 환경 설정 (Local Setup)
+
+### 필요 프로그램 (설치 완료됨)
+
+| 도구 | 용도 | 확인 명령 |
+|---|---|---|
+| Python 3.12 (`python@3.12`) | trading_engine 실행 | `/opt/homebrew/bin/python3.12 --version` |
+| PHP 8.5 / Composer | api 실행 | `php --version`, `composer --version` |
+| Colima + Docker + Docker Compose | 로컬 MySQL/Redis/컨테이너 구동 | `docker info`, `docker compose version` |
+| Redis (brew) | `redis-cli`로 로컬 디버깅 | `redis-cli ping` |
+| mysql-client (brew, keg-only) | `mysql` CLI 접속 | `~/.zshrc`에 PATH 추가됨 (새 터미널부터 적용) |
+
+Colima는 로그인 시 자동 시작되지 않으므로, 컴퓨터를 재부팅했다면 아래로 다시 켜야 합니다.
+
+```bash
+colima start
+```
+
+### 프로젝트 구조
+
+```
+trading_engine/   # Python 분석/매매 엔진 (Step 1~7 구현 대상)
+api/              # PHP REST API (Step 5 구현 대상)
+database/init.sql # MySQL 스키마 (docker-compose 최초 기동 시 자동 반영)
+deploy/           # 운영 서버 배포용 nginx/systemd/스크립트 템플릿
+docker-compose.yml
+```
+
+### 최초 셋업
+
+```bash
+cp .env.example .env   # 값 채우기 (Upbit/OpenAI 키, JWT_SECRET 등)
+
+# Python 엔진
+cd trading_engine
+/opt/homebrew/bin/python3.12 -m venv venv
+./venv/bin/pip install -r requirements.txt
+
+# PHP API
+cd ../api
+composer install
+```
+
+### 로컬 전체 스택 기동 (MySQL + Redis + PHP API + Python Engine)
+
+```bash
+docker compose up -d --build
+curl http://localhost:8080/          # PHP API 확인
+docker compose logs -f python-engine # Python 엔진 로그 확인
+docker compose down                  # 종료 (데이터는 volume에 유지)
+```
+
+Python 엔진만 로컬에서 직접 실행하며 개발하고 싶다면 MySQL/Redis만 컨테이너로 띄우고, Python은 venv로 실행하는 방식도 가능합니다.
+
+```bash
+docker compose up -d mysql redis
+cd trading_engine && ./venv/bin/python main.py
+```
+
+### 배포 사전 작업 (서버 확정 후)
+
+서버(예: AWS/NCP/자체 서버)가 정해지면 아래 순서로 진행합니다.
+
+1. `deploy/nginx/ai-trading.conf`의 도메인/경로를 채워 Nginx에 반영하고 HTTPS(Let's Encrypt) 설정
+2. `deploy/systemd/ai-trading-engine.service`, `ai-trading-scheduler.service`를 서버의 `/etc/systemd/system/`에 배치 후 `systemctl enable --now`
+3. 서버에도 동일하게 `.env` 구성 (Upbit API 키는 반드시 서버 고정 IP 화이트리스트 + 출금 권한 제외)
+4. `api/Dockerfile`(php-fpm) 기반으로 운영 컨테이너 빌드 또는 `deploy/scripts/deploy.sh`로 rsync + systemd 재시작 방식 배포
+5. `.github/workflows/ci.yml`에 배포 job을 추가해 push 시 자동 배포로 확장 가능
+
+> `deploy/scripts/deploy.sh`와 systemd 유닛의 `REPLACE_WITH_*` 값은 서버 확정 후 실제 값으로 교체해야 합니다.
+

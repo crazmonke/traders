@@ -1,0 +1,20 @@
+# Python 매매 엔진(WebSocket 수집/Rule Engine) 상시 구동용 systemd 유닛 템플릿
+# 서버가 정해지면 /etc/systemd/system/ai-trading-engine.service 로 복사 후:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ai-trading-engine
+
+[Unit]
+Description=AI Trading Python Engine
+After=network.target mysql.service redis-server.service
+
+[Service]
+Type=simple
+User=REPLACE_WITH_DEPLOY_USER
+WorkingDirectory=/var/www/ai-trading/trading_engine
+EnvironmentFile=/var/www/ai-trading/.env
+ExecStart=/var/www/ai-trading/trading_engine/venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

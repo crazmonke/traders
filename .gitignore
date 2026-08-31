@@ -1,0 +1,29 @@
+# Env
+.env
+.env.*
+!.env.example
+
+# Python
+trading_engine/venv/
+trading_engine/__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# PHP
+api/vendor/
+composer.lock
+
+# Node (frontend, if added later)
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+
+# Docker volumes/data
+mysql-data/
+redis-data/

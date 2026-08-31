@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r trading_engine/requirements.txt
+      - run: pytest trading_engine/tests
+
+  php-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+      - run: composer install --working-dir=api --no-interaction
+      # TODO: PHPUnit 테스트 추가 후 아래 주석 해제
+      # - run: composer test --working-dir=api

@@ -1,0 +1,68 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change_me_root}
+      MYSQL_DATABASE: ${DB_DATABASE:-ai_trading}
+      MYSQL_USER: ${DB_USERNAME:-ai_trading}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change_me}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  php-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./api:/var/www/html
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  python-engine:
+    build:
+      context: ./trading_engine
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./trading_engine:/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
+  redis-data:

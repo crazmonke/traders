@@ -1,0 +1,13 @@
+# 로컬 개발용 (php built-in server). 운영 배포는 Dockerfile(php-fpm) + deploy/nginx 참고.
+FROM php:8.3-cli
+
+RUN docker-php-ext-install pdo_mysql
+
+WORKDIR /var/www/html
+COPY . .
+
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+RUN composer install --no-interaction --optimize-autoloader || true
+
+EXPOSE 8080
+CMD ["php", "-S", "0.0.0.0:8080", "-t", "public"]
