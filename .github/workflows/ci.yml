@@ -15,17 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r trading_engine/requirements.txt
-      - name: pytest
-        run: |
-          # 테스트 파일이 아직 없으면 pytest는 종료코드 5(no tests collected)를 반환한다.
-          # 실제 테스트가 추가되기 전까지는 이를 실패로 취급하지 않는다.
-          code=0
-          pytest trading_engine/tests || code=$?
-          if [ "$code" -eq 5 ]; then
-            echo "::warning::수집된 테스트가 없습니다 (exit 5) - 성공으로 처리합니다. Step 1 구현 시 테스트를 추가하세요."
-            exit 0
-          fi
-          exit "$code"
+      - run: pytest
 
   php-tests:
     runs-on: ubuntu-latest

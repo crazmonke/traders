@@ -50,13 +50,13 @@ services:
 
   python-engine:
     build:
-      context: ./trading_engine
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: trading_engine/Dockerfile
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      - ./trading_engine:/app
+      - ./trading_engine:/app/trading_engine
     depends_on:
       mysql:
         condition: service_healthy
