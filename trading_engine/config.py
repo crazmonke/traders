@@ -32,6 +32,9 @@ class Settings:
     )
     # Redis 캐시 TTL(초). 엔진이 죽었을 때 낡은 시세가 살아있는 것처럼 보이지 않게 한다.
     cache_ttl_sec: int = int(os.getenv("MARKET_CACHE_TTL_SEC", "60"))
+    # 캔들·지표는 5분봉 기준이라 틱보다 갱신이 뜸하다. TTL을 따로 준다.
+    candle_cache_ttl_sec: int = int(os.getenv("MARKET_CANDLE_TTL_SEC", "3600"))
+    indicator_cache_ttl_sec: int = int(os.getenv("MARKET_INDICATOR_TTL_SEC", "300"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 

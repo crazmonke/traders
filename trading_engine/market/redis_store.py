@@ -1,14 +1,16 @@
 """Upbit 실시간 데이터를 Redis에 캐싱한다.
 
 키 구조는 prompt.md 3.1절을 따른다.
-    market:{code}:ticker     -> String(JSON)
-    market:{code}:orderbook  -> String(JSON)
+    market:{code}:ticker      -> String(JSON)
+    market:{code}:orderbook   -> String(JSON)
+    market:{code}:candles:5m  -> List(JSON 요소, 오래된 봉부터)
+    market:{code}:indicators  -> String(JSON)  # Step 1-b 산출물
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Sequence
 
 import redis.asyncio as redis
 
@@ -23,8 +25,22 @@ def orderbook_key(market: str) -> str:
     return f"market:{market}:orderbook"
 
 
+def candles_key(market: str, interval: str = "5m") -> str:
+    return f"market:{market}:candles:{interval}"
+
+
+def indicators_key(market: str) -> str:
+    return f"market:{market}:indicators"
+
+
 class RedisStore:
-    def __init__(self, client: redis.Redis | None = None, ttl: int | None = None) -> None:
+    def __init__(
+        self,
+        client: redis.Redis | None = None,
+        ttl: int | None = None,
+        candle_ttl: int | None = None,
+        indicator_ttl: int | None = None,
+    ) -> None:
         self._client = client or redis.Redis(
             host=settings.redis_host,
             port=settings.redis_port,
@@ -32,6 +48,10 @@ class RedisStore:
             decode_responses=True,
         )
         self._ttl = settings.cache_ttl_sec if ttl is None else ttl
+        self._candle_ttl = settings.candle_cache_ttl_sec if candle_ttl is None else candle_ttl
+        self._indicator_ttl = (
+            settings.indicator_cache_ttl_sec if indicator_ttl is None else indicator_ttl
+        )
 
     @property
     def client(self) -> redis.Redis:
@@ -46,8 +66,29 @@ class RedisStore:
     async def save_orderbook(self, market: str, payload: dict[str, Any]) -> None:
         await self._set_json(orderbook_key(market), payload)
 
-    async def _set_json(self, key: str, payload: dict[str, Any]) -> None:
-        await self._client.set(key, json.dumps(payload, ensure_ascii=False), ex=self._ttl)
+    async def save_indicators(self, market: str, payload: dict[str, Any]) -> None:
+        await self._set_json(indicators_key(market), payload, ttl=self._indicator_ttl)
+
+    async def save_candles(
+        self, market: str, candles: Sequence[dict[str, Any]], interval: str = "5m"
+    ) -> None:
+        """캔들 List를 통째로 교체한다. 봉이 닫힐 때만 호출하므로 비용은 문제되지 않는다."""
+        key = candles_key(market, interval)
+        pipe = self._client.pipeline()
+        pipe.delete(key)
+        if candles:
+            pipe.rpush(key, *[json.dumps(candle, ensure_ascii=False) for candle in candles])
+            pipe.expire(key, self._candle_ttl)
+        await pipe.execute()
+
+    async def load_candles(self, market: str, interval: str = "5m") -> list[dict[str, Any]]:
+        rows = await self._client.lrange(candles_key(market, interval), 0, -1)
+        return [json.loads(row) for row in rows]
+
+    async def _set_json(self, key: str, payload: dict[str, Any], ttl: int | None = None) -> None:
+        await self._client.set(
+            key, json.dumps(payload, ensure_ascii=False), ex=self._ttl if ttl is None else ttl
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

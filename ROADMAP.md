@@ -21,7 +21,7 @@
 
 | 완료 | 스텝 | 목표 | 착수 전 상태 | 완료일 |
 |---|---|---|---|---|
-| [ ] | **1** | Upbit WebSocket 수집 + 지표 엔진 (`market/`, `indicators/`) | 0% — `main.py` 8줄 placeholder, 빈 패키지 | |
+| [x] | **1** | Upbit WebSocket 수집 + 지표 엔진 (`market/`, `indicators/`) | 0% — `main.py` 8줄 placeholder, 빈 패키지 | 2026-09-01 |
 | [ ] | **2** | RuleEngine + OpenAI 연동 + `ai_signals` 저장 (`strategy/`, `ai/`, `database/`) | 0% — 빈 패키지 | |
 | [ ] | **3** | 백테스팅 엔진, 수수료·슬리피지 반영 (`backtest/`) | 0% — 빈 패키지 | |
 | [ ] | **4** | 실거래 안전장치 + 매매 실행 (`trading/`) | 0% — 테이블만 있고 읽는 코드 없음 | |
@@ -62,8 +62,8 @@
 
 | 날짜 | 진행 |
 |---|---|
-| 9/1 (화) | Step 1-a — Upbit WebSocket 수집 + Redis 캐싱 |
-| 9/2 (수) | Step 1-b — 지표 계산(RSI/MACD/MA/호가불균형) + 재접속 백오프 |
+| 9/1 (화) | ~~Step 1-a — Upbit WebSocket 수집 + Redis 캐싱~~ 완료 |
+| 9/2 (수) | ~~Step 1-b — 지표 계산(RSI/MACD/MA/호가불균형) + 재접속 백오프~~ 9/1 선행 완료 |
 | 9/3 (목) | Step 2 — RuleEngine + OpenAI + ai_signals 저장 |
 | 9/4 (금) | Step 3 — 백테스팅 엔진 |
 | 9/5 (토) | Step 4 — 실거래 안전장치·매매 실행 |
