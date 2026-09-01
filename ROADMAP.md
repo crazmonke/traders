@@ -35,7 +35,8 @@
 각 스텝의 상세 요구사항은 `prompt.md`의 해당 `[Step N]` 프롬프트를 원본으로 삼는다.
 아래는 "끝났다"고 말하기 위한 최소 조건이다.
 
-- **Step 1** — 5개 마켓(KRW-BTC/ETH/XRP/SOL/DOGE) ticker·orderbook이 Redis에 실시간 적재되고,
+- **Step 1** — `.env` 의 `MARKETS` 로 지정한 마켓(미지정 시 기본 5개: KRW-BTC/ETH/XRP/SOL/DOGE)의
+  ticker·orderbook이 Redis에 실시간 적재되고,
   RSI(14) / MACD(12,26,9) / MA(5,20,60) 정배열 / 호가 불균형이 계산된다. 끊기면 지수 백오프로 재접속한다.
 - **Step 2** — `S_Tech`가 prompt.md §3.2 배점표대로 산출되고 `min(sum, 100)`으로 clamp된다.
   70 이상 / 30 이하일 때만 OpenAI를 호출하고, Redis TTL 키로 중복 호출을 막는다.
