@@ -1466,7 +1466,7 @@ Python 엔진만 로컬에서 직접 실행하며 개발하고 싶다면 MySQL/R
 
 ```bash
 docker compose up -d mysql redis
-cd trading_engine && ./venv/bin/python main.py
+trading_engine/venv/bin/python -m trading_engine.main
 ```
 
 ### 웹 소스 위치와 라우팅
