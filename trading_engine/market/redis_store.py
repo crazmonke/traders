@@ -7,8 +7,12 @@
     market:{code}:indicators  -> String(JSON)
 
 v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
-    exchange:{code}:{symbol}:ticker    -> String(JSON)
-    exchange:{code}:{symbol}:orderbook -> String(JSON)
+    exchange:{code}:{symbol}:ticker     -> String(JSON)
+    exchange:{code}:{symbol}:orderbook  -> String(JSON)
+    exchange:{code}:{symbol}:candles:5m -> List(JSON 요소, 오래된 봉부터)
+    exchange:{code}:{symbol}:indicators -> String(JSON)
+    global:{symbol}:price               -> String(JSON)  # 거래량 가중 평균
+    global:{symbol}:indicators          -> String(JSON)
 """
 
 from __future__ import annotations
@@ -40,6 +44,10 @@ def indicators_key(market: str) -> str:
 def exchange_key(exchange: str, symbol: str, kind: str) -> str:
     """거래소별 키. 심볼의 '/' 는 Redis 키에서 보기 나쁘므로 '-' 로 바꾼다."""
     return f"exchange:{exchange}:{symbol.replace('/', '-')}:{kind}"
+
+
+def global_key(symbol: str, kind: str) -> str:
+    return f"global:{symbol}:{kind}"
 
 
 class RedisStore:
@@ -85,6 +93,30 @@ class RedisStore:
     ) -> None:
         await self._set_json(exchange_key(exchange, symbol, "orderbook"), payload)
 
+    async def save_exchange_indicators(
+        self, exchange: str, symbol: str, payload: dict[str, Any]
+    ) -> None:
+        await self._set_json(
+            exchange_key(exchange, symbol, "indicators"), payload, ttl=self._indicator_ttl
+        )
+
+    async def save_exchange_candles(
+        self,
+        exchange: str,
+        symbol: str,
+        candles: Sequence[dict[str, Any]],
+        interval: str = "5m",
+    ) -> None:
+        await self._replace_list(
+            exchange_key(exchange, symbol, f"candles:{interval}"), candles, self._candle_ttl
+        )
+
+    async def save_global_price(self, symbol: str, payload: dict[str, Any]) -> None:
+        await self._set_json(global_key(symbol, "price"), payload, ttl=self._indicator_ttl)
+
+    async def save_global_indicators(self, symbol: str, payload: dict[str, Any]) -> None:
+        await self._set_json(global_key(symbol, "indicators"), payload, ttl=self._indicator_ttl)
+
     async def save_indicators(self, market: str, payload: dict[str, Any]) -> None:
         await self._set_json(indicators_key(market), payload, ttl=self._indicator_ttl)
 
@@ -92,12 +124,16 @@ class RedisStore:
         self, market: str, candles: Sequence[dict[str, Any]], interval: str = "5m"
     ) -> None:
         """캔들 List를 통째로 교체한다. 봉이 닫힐 때만 호출하므로 비용은 문제되지 않는다."""
-        key = candles_key(market, interval)
+        await self._replace_list(candles_key(market, interval), candles, self._candle_ttl)
+
+    async def _replace_list(
+        self, key: str, items: Sequence[dict[str, Any]], ttl: int
+    ) -> None:
         pipe = self._client.pipeline()
         pipe.delete(key)
-        if candles:
-            pipe.rpush(key, *[json.dumps(candle, ensure_ascii=False) for candle in candles])
-            pipe.expire(key, self._candle_ttl)
+        if items:
+            pipe.rpush(key, *[json.dumps(item, ensure_ascii=False) for item in items])
+            pipe.expire(key, ttl)
         await pipe.execute()
 
     async def load_candles(self, market: str, interval: str = "5m") -> list[dict[str, Any]]:

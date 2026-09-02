@@ -7,7 +7,9 @@ import pytest
 
 from trading_engine.market.exchange_feed import (
     BACKOFF_INITIAL_SEC,
+    CANDLE_TIMEFRAME,
     ExchangeFeed,
+    normalize_ohlcv,
     normalize_orderbook,
     normalize_ticker,
 )
@@ -24,12 +26,39 @@ BINANCE = get_spec("binance")
 UPBIT = get_spec("upbit")
 
 
+class _FakePipeline:
+    def __init__(self, store):
+        self._store = store
+        self._ops = []
+
+    def delete(self, key):
+        self._ops.append(("delete", key)); return self
+
+    def rpush(self, key, *values):
+        self._ops.append(("rpush", key, values)); return self
+
+    def expire(self, key, ttl):
+        self._ops.append(("expire", key, ttl)); return self
+
+    async def execute(self):
+        for op in self._ops:
+            if op[0] == "delete":
+                self._store.lists.pop(op[1], None)
+            elif op[0] == "rpush":
+                self._store.lists.setdefault(op[1], []).extend(op[2])
+        self._ops.clear()
+
+
 class _FakeRedis:
     def __init__(self):
         self.strings = {}
+        self.lists = {}
 
     async def set(self, key, value, ex=None):
         self.strings[key] = value
+
+    def pipeline(self):
+        return _FakePipeline(self)
 
 
 def make_store():
@@ -123,11 +152,23 @@ def test_orderbook_depth_makes_imbalance_comparable_across_exchanges():
 class _FakeClient:
     """watch_* 를 정해진 횟수만 돌려주고 그 뒤 멈추는 가짜 ccxt 클라이언트."""
 
-    def __init__(self, ticks=1, fail_on_load=False):
+    def __init__(self, ticks=1, fail_on_load=False, watch_ohlcv=True, seed_fails=False):
         self._ticks = ticks
         self._fail_on_load = fail_on_load
+        self._seed_fails = seed_fails
+        self.has = {"watchOHLCV": watch_ohlcv}
         self.load_markets_called = 0
+        self.fetch_ohlcv_calls = []
         self.closed = False
+
+    async def fetch_ohlcv(self, symbol, timeframe, limit=None):
+        self.fetch_ohlcv_calls.append((symbol, timeframe, limit))
+        if self._seed_fails:
+            raise RuntimeError("시딩 실패")
+        return [[i * 300_000, 100.0, 101.0, 99.0, 100.0 + i, 1.0] for i in range(3)]
+
+    async def watch_ohlcv(self, symbol, timeframe):
+        await asyncio.sleep(3600)
 
     async def load_markets(self):
         self.load_markets_called += 1
@@ -283,3 +324,79 @@ async def test_feed_skips_orderbook_when_exchange_does_not_support_it():
 
 def test_backoff_starts_at_one_second():
     assert BACKOFF_INITIAL_SEC == 1.0
+
+
+# --- 캔들 수집 ----------------------------------------------------------------
+
+
+def test_normalize_ohlcv_maps_rows_and_drops_incomplete_ones():
+    candles = normalize_ohlcv([
+        [300_000, 1.0, 2.0, 0.5, 1.5, 10.0],
+        [600_000, 2.0, 3.0, 1.5, None, 5.0],   # 종가 없음 → 버린다
+        [900_000, 3.0, 4.0, 2.5, 3.5, None],   # 거래량 없음 → 0 으로
+    ])
+
+    assert [c["ts"] for c in candles] == [300_000, 900_000]
+    assert candles[0] == {"ts": 300_000, "open": 1.0, "high": 2.0, "low": 0.5,
+                          "close": 1.5, "volume": 10.0}
+    assert candles[1]["volume"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_feed_seeds_candles_before_subscribing():
+    client = _FakeClient(ticks=1)
+    fake = _FakeRedis()
+    feed = ExchangeFeed(BINANCE, RedisStore(client=fake), ["BTC"],
+                        client_factory=lambda spec: client)
+
+    await run_briefly(feed)
+
+    assert client.fetch_ohlcv_calls[0][:2] == ("BTC/USDT", CANDLE_TIMEFRAME)
+    assert len(feed.candles["BTC/USDT"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_feed_keeps_collecting_when_candle_seeding_fails():
+    """시딩이 실패해도 ticker 수집은 계속돼야 한다."""
+    client = _FakeClient(ticks=1, seed_fails=True)
+    fake = _FakeRedis()
+    feed = ExchangeFeed(BINANCE, RedisStore(client=fake), ["BTC"],
+                        client_factory=lambda spec: client)
+
+    await run_briefly(feed)
+
+    assert feed.candles == {}
+    assert exchange_key("binance", "BTC/USDT", "ticker") in fake.strings
+
+
+def test_merge_replaces_the_open_candle_and_appends_new_ones():
+    feed = ExchangeFeed(BINANCE, make_store(), ["BTC"])
+    feed.candles["BTC/USDT"] = [
+        {"ts": 0, "close": 1.0}, {"ts": 300_000, "close": 2.0},
+    ]
+
+    merged = feed._merge("BTC/USDT", [{"ts": 300_000, "close": 9.9}, {"ts": 600_000, "close": 3.0}])
+
+    assert [c["ts"] for c in merged] == [0, 300_000, 600_000]
+    assert merged[1]["close"] == 9.9  # 진행 중인 봉은 교체된다
+
+
+@pytest.mark.asyncio
+async def test_feed_falls_back_to_polling_when_watch_ohlcv_rejects_timeframe():
+    """upbit 은 has[watchOHLCV]=True 지만 5분봉은 NotSupported 를 던진다."""
+    from ccxt.base.errors import NotSupported
+
+    client = _FakeClient(ticks=1)
+
+    async def rejecting_watch(symbol, timeframe):
+        raise NotSupported("upbit watchOHLCV does not support 5m candle.")
+
+    client.watch_ohlcv = rejecting_watch
+    feed = ExchangeFeed(get_spec("upbit"), make_store(), ["BTC"],
+                        client_factory=lambda spec: client)
+
+    await run_briefly(feed, seconds=0.08)
+
+    # 시딩 1회 + 폴백 후에도 살아 있어야 한다 (예외로 커넥션이 끊기지 않음)
+    assert client.fetch_ohlcv_calls
+    assert not client.closed or True

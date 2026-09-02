@@ -18,10 +18,25 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 MA_PERIODS = (5, 20, 60)
+BBANDS_LENGTH = 20
+BBANDS_STD = 2.0
+STOCH_K = 14
+STOCH_D = 3
+ADX_LENGTH = 14
+CCI_LENGTH = 20
 
 # 각 지표가 값을 내려면 필요한 최소 봉 수
 MIN_RSI_CANDLES = RSI_LENGTH + 1
 MIN_MACD_CANDLES = MACD_SLOW + MACD_SIGNAL
+MIN_BBANDS_CANDLES = BBANDS_LENGTH
+MIN_STOCH_CANDLES = STOCH_K + STOCH_D
+MIN_ADX_CANDLES = ADX_LENGTH * 2  # DM 평활에 워밍업이 한 주기 더 필요하다
+MIN_CCI_CANDLES = CCI_LENGTH
+
+BB_BELOW_LOWER = "BELOW_LOWER"
+BB_LOWER_HALF = "LOWER_HALF"
+BB_UPPER_HALF = "UPPER_HALF"
+BB_ABOVE_UPPER = "ABOVE_UPPER"
 
 TREND_BULLISH = "bullish"
 TREND_BEARISH = "bearish"
@@ -44,6 +59,14 @@ class Indicators:
     ma20: float | None
     ma60: float | None
     ma_trend: str
+    bb_lower: float | None
+    bb_mid: float | None
+    bb_upper: float | None
+    bollinger_position: str | None
+    stochastic_k: float | None
+    stochastic_d: float | None
+    adx: float | None
+    cci: float | None
     orderbook_imbalance: float | None
     volume_change_rate: float | None
     candle_count: int
@@ -61,6 +84,51 @@ def _last(series: pd.Series | None) -> float | None:
     if pd.isna(value):
         return None
     return float(value)
+
+
+def _column(frame: pd.DataFrame | None, prefix: str) -> pd.Series | None:
+    """접두사로 컬럼을 찾는다.
+
+    pandas_ta 는 버전마다 접미사가 달라진다 (예: BBL_20_2.0 vs BBL_20_2.0_2.0).
+    이름을 통째로 박아두면 라이브러리를 올릴 때 조용히 None 이 된다.
+    """
+    if frame is None or frame.empty:
+        return None
+    for name in frame.columns:
+        if name.startswith(prefix):
+            return frame[name]
+    return None
+
+
+def compute_cci(
+    high: pd.Series, low: pd.Series, close: pd.Series, length: int = CCI_LENGTH
+) -> pd.Series:
+    """CCI = (TP - SMA(TP)) / (0.015 * 평균편차). TP = (고가+저가+종가)/3.
+
+    `pandas_ta.cci` 를 쓰지 않는다. 0.4.71b0 에서 부호와 크기가 모두 어긋난 값을
+    돌려준다(상승 추세 표본에서 수동 계산 +126.67 vs 라이브러리 -4986.74).
+    Step 2 배점에 그대로 들어가는 값이라 직접 계산한다. 2026-09-02 확인.
+    """
+    typical = (high + low + close) / 3.0
+    sma = typical.rolling(length).mean()
+    mean_dev = typical.rolling(length).apply(
+        lambda window: float(abs(window - window.mean()).mean()), raw=True
+    )
+    # 평균편차 0 (완전 평탄) 이면 정의되지 않는다. inf 대신 NaN 으로 둔다.
+    return (typical - sma) / (0.015 * mean_dev.replace(0.0, pd.NA))
+
+
+def classify_bollinger_position(
+    close: float | None, lower: float | None, mid: float | None, upper: float | None
+) -> str | None:
+    """현재가가 밴드의 어디에 있는지. ai_signals.bollinger_position ENUM 과 같은 값."""
+    if None in (close, lower, mid, upper):
+        return None
+    if close < lower:
+        return BB_BELOW_LOWER
+    if close > upper:
+        return BB_ABOVE_UPPER
+    return BB_LOWER_HALF if close < mid else BB_UPPER_HALF
 
 
 def to_dataframe(candles: Sequence[dict[str, Any]]) -> pd.DataFrame:
@@ -131,6 +199,8 @@ def compute(
     mas: dict[int, float | None] = {period: None for period in MA_PERIODS}
     close_price = volume_change = None
     candle_ts = None
+    bb_lower = bb_mid = bb_upper = None
+    stoch_k = stoch_d = adx_value = cci_value = None
 
     if count:
         close = df["close"].astype(float)
@@ -156,6 +226,27 @@ def compute(
             if count >= period:
                 mas[period] = _last(close.rolling(period).mean())
 
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+
+        if count >= MIN_BBANDS_CANDLES:
+            bb = ta.bbands(close, length=BBANDS_LENGTH, std=BBANDS_STD)
+            bb_lower = _last(_column(bb, "BBL_"))
+            bb_mid = _last(_column(bb, "BBM_"))
+            bb_upper = _last(_column(bb, "BBU_"))
+
+        if count >= MIN_STOCH_CANDLES:
+            stoch = ta.stoch(high, low, close, k=STOCH_K, d=STOCH_D)
+            stoch_k = _last(_column(stoch, "STOCHk_"))
+            stoch_d = _last(_column(stoch, "STOCHd_"))
+
+        if count >= MIN_ADX_CANDLES:
+            adx_frame = ta.adx(high, low, close, length=ADX_LENGTH)
+            adx_value = _last(_column(adx_frame, "ADX_"))
+
+        if count >= MIN_CCI_CANDLES:
+            cci_value = _last(compute_cci(high, low, close, CCI_LENGTH))
+
     orderbook = orderbook or {}
     imbalance = compute_orderbook_imbalance(
         orderbook.get("total_bid_size"), orderbook.get("total_ask_size")
@@ -173,6 +264,16 @@ def compute(
         ma20=mas[20],
         ma60=mas[60],
         ma_trend=classify_ma_trend(mas[5], mas[20], mas[60]),
+        bb_lower=bb_lower,
+        bb_mid=bb_mid,
+        bb_upper=bb_upper,
+        bollinger_position=classify_bollinger_position(
+            close_price, bb_lower, bb_mid, bb_upper
+        ),
+        stochastic_k=stoch_k,
+        stochastic_d=stoch_d,
+        adx=adx_value,
+        cci=cci_value,
         orderbook_imbalance=imbalance,
         volume_change_rate=volume_change,
         candle_count=count,

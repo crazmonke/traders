@@ -11,6 +11,8 @@ import logging
 import random
 from typing import Any, Awaitable, Callable
 
+from ccxt.base.errors import NotSupported
+
 from trading_engine.market.exchange_registry import ExchangeSpec, create_client
 from trading_engine.market.redis_store import RedisStore
 
@@ -20,6 +22,11 @@ log = logging.getLogger(__name__)
 BACKOFF_INITIAL_SEC = 1.0
 BACKOFF_FACTOR = 2.0
 BACKOFF_MAX_SEC = 60.0
+
+CANDLE_TIMEFRAME = "5m"
+CANDLE_LIMIT = 100  # prompt.md v2 [Step 1] 요구사항 5 — 최근 100봉
+# watchOHLCV 를 지원하지 않는 거래소(coinbase)는 이 주기로 다시 받아온다.
+CANDLE_POLL_SEC = 20.0
 
 Handler = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
 """(event_type, exchange_code, symbol, payload) 를 받는 비동기 핸들러."""
@@ -43,6 +50,25 @@ def normalize_ticker(spec: ExchangeSpec, ticker: dict[str, Any]) -> dict[str, An
         "low_price": ticker.get("low"),
         "timestamp": ticker.get("timestamp"),
     }
+
+
+def normalize_ohlcv(rows: Any) -> list[dict[str, Any]]:
+    """ccxt OHLCV([ts, o, h, l, c, v]) 를 내부 캔들 표현으로. 오래된 봉부터."""
+    candles = []
+    for row in rows or []:
+        if len(row) < 6 or row[4] is None:
+            continue
+        candles.append(
+            {
+                "ts": int(row[0]),
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5] or 0.0),
+            }
+        )
+    return candles
 
 
 def _side_total(levels: Any, depth: int) -> float:
@@ -94,6 +120,8 @@ class ExchangeFeed:
         self._depth = orderbook_depth
         self._handlers: list[Handler] = []
         self._stopping = asyncio.Event()
+        # 마켓별 최근 캔들. 지표 계산이 여기서 읽어간다.
+        self.candles: dict[str, list[dict[str, Any]]] = {}
 
     @property
     def code(self) -> str:
@@ -145,13 +173,75 @@ class ExchangeFeed:
 
     async def _consume(self, client: Any) -> None:
         """심볼×채널 별 구독 루프를 동시에 돌린다. 하나가 죽으면 전부 접고 재접속한다."""
+        # 지표는 캔들이 있어야 나온다. 구독 전에 REST 로 100봉을 채운다.
+        for base in self._bases:
+            await self._seed_candles(client, self._spec.symbol(base))
+
         tasks = []
         for base in self._bases:
             symbol = self._spec.symbol(base)
             tasks.append(self._watch_ticker(client, symbol))
+            tasks.append(self._follow_candles(client, symbol))
             if self._spec.supports_orderbook:
                 tasks.append(self._watch_orderbook(client, symbol))
         await asyncio.gather(*tasks)
+
+    async def _seed_candles(self, client: Any, symbol: str) -> None:
+        """실패해도 수집은 계속한다. 봉이 쌓이면 지표도 뒤늦게 나온다."""
+        try:
+            rows = await client.fetch_ohlcv(symbol, CANDLE_TIMEFRAME, limit=CANDLE_LIMIT)
+        except Exception:
+            log.exception("%s %s 캔들 시딩 실패 - 이후 갱신으로 채운다", self.code, symbol)
+            return
+        candles = normalize_ohlcv(rows)
+        if candles:
+            await self._store_candles(symbol, candles)
+            log.info("%s %s 캔들 시딩 완료 (%d봉)", self.code, symbol, len(candles))
+
+    async def _follow_candles(self, client: Any, symbol: str) -> None:
+        """watchOHLCV 로 구독하고, 안 되면 REST 폴링으로 물러선다.
+
+        `has["watchOHLCV"]` 만으로는 판단할 수 없다. upbit 은 이 플래그가 True 지만
+        5분봉은 지원하지 않아 NotSupported 를 던진다(2026-09-02 확인). 거래소마다
+        지원 봉이 다르므로 플래그 대신 실제로 던지는 예외를 보고 결정한다.
+        """
+        supports_watch = bool(getattr(client, "has", {}).get("watchOHLCV"))
+        while not self._stopping.is_set():
+            if supports_watch:
+                try:
+                    rows = await client.watch_ohlcv(symbol, CANDLE_TIMEFRAME)
+                except NotSupported as exc:
+                    log.info(
+                        "%s %s watchOHLCV(%s) 미지원 - %.0f초 폴링으로 전환한다 (%s)",
+                        self.code, symbol, CANDLE_TIMEFRAME, CANDLE_POLL_SEC, exc,
+                    )
+                    supports_watch = False
+                    continue
+                candles = self._merge(symbol, normalize_ohlcv(rows))
+            else:
+                await asyncio.sleep(CANDLE_POLL_SEC)
+                rows = await client.fetch_ohlcv(symbol, CANDLE_TIMEFRAME, limit=CANDLE_LIMIT)
+                candles = normalize_ohlcv(rows)
+            if not candles:
+                continue
+            await self._store_candles(symbol, candles)
+            # 지표 엔진이 캔들을 바로 쓰도록 payload 에 실어 보낸다 (같은 프로세스라 직렬화 없음).
+            await self._dispatch("candle", symbol, {"symbol": symbol, "candles": candles})
+
+    def _merge(self, symbol: str, updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """watch_ohlcv 는 갱신된 봉만 준다. 기존 봉 위에 덮어쓴다.
+
+        같은 ts 면 교체(진행 중인 봉이 자라는 경우), 새 ts 면 추가.
+        """
+        merged = {candle["ts"]: candle for candle in self.candles.get(symbol, [])}
+        for candle in updates:
+            merged[candle["ts"]] = candle
+        ordered = [merged[ts] for ts in sorted(merged)]
+        return ordered[-CANDLE_LIMIT:]
+
+    async def _store_candles(self, symbol: str, candles: list[dict[str, Any]]) -> None:
+        self.candles[symbol] = candles
+        await self._store.save_exchange_candles(self.code, symbol, candles, CANDLE_TIMEFRAME)
 
     async def _watch_ticker(self, client: Any, symbol: str) -> None:
         while not self._stopping.is_set():

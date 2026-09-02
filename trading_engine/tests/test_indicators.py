@@ -1,37 +1,42 @@
-"""Step 1-b 캔들·지표 계층 단위 테스트."""
+"""지표 계산 · 거래소별 지표 엔진 · 글로벌 집계 단위 테스트."""
 
 import json
 import math
 
+import pandas as pd
 import pytest
 
 from trading_engine.indicators import calculator
 from trading_engine.indicators.calculator import (
+    BB_ABOVE_UPPER,
+    BB_BELOW_LOWER,
+    BB_LOWER_HALF,
+    BB_UPPER_HALF,
     MIN_MACD_CANDLES,
     TREND_BEARISH,
     TREND_BULLISH,
     TREND_MIXED,
     TREND_UNKNOWN,
+    classify_bollinger_position,
     classify_ma_trend,
+    compute_cci,
     compute_orderbook_imbalance,
     compute_volume_change_rate,
 )
 from trading_engine.indicators.engine import IndicatorEngine
-from trading_engine.market.candle_feed import CandleFeed, bucket_start, parse_rest_candle
-from trading_engine.market.redis_store import RedisStore, candles_key, indicators_key
+from trading_engine.market.market_manager import MarketManager, base_of, weighted_average
+from trading_engine.market.redis_store import RedisStore, exchange_key, global_key
 
-MINUTE_MS = 60 * 1000
-BUCKET_MS = 5 * MINUTE_MS
+BUCKET_MS = 5 * 60 * 1000
 
 
-def make_candles(closes, start_ts=0, volume=1.0):
-    """종가만 지정해 캔들 리스트를 만든다."""
+def make_candles(closes, spread=1.0, volume=1.0, start_ts=0):
     return [
         {
             "ts": start_ts + index * BUCKET_MS,
             "open": close,
-            "high": close,
-            "low": close,
+            "high": close + spread,
+            "low": close - spread,
             "close": close,
             "volume": volume,
         }
@@ -39,90 +44,17 @@ def make_candles(closes, start_ts=0, volume=1.0):
     ]
 
 
-# --- 캔들 집계 ---------------------------------------------------------------
+class _FakeRedis:
+    def __init__(self):
+        self.strings = {}
+        self.lists = {}
+
+    async def set(self, key, value, ex=None):
+        self.strings[key] = value
 
 
-def test_bucket_start_floors_to_five_minute_grid():
-    assert bucket_start(0) == 0
-    assert bucket_start(4 * MINUTE_MS + 59_000) == 0
-    assert bucket_start(5 * MINUTE_MS) == BUCKET_MS
-    assert bucket_start(12 * MINUTE_MS) == 2 * BUCKET_MS
-
-
-def test_parse_rest_candle_uses_candle_start_time_not_last_trade():
-    parsed = parse_rest_candle(
-        {
-            "candle_date_time_utc": "2026-09-01T00:05:00",
-            "opening_price": 100.0,
-            "high_price": 110.0,
-            "low_price": 95.0,
-            "trade_price": 105.0,
-            "candle_acc_trade_volume": 3.5,
-            "timestamp": 1_788_221_040_000,
-        }
-    )
-
-    assert parsed["ts"] == 1_788_221_100_000  # 2026-09-01T00:05:00Z
-    assert parsed["open"] == 100.0
-    assert parsed["high"] == 110.0
-    assert parsed["low"] == 95.0
-    assert parsed["close"] == 105.0
-    assert parsed["volume"] == 3.5
-
-
-def test_update_from_tick_accumulates_into_current_candle():
-    feed = CandleFeed(["KRW-BTC"])
-
-    _, opened = feed.update_from_tick("KRW-BTC", {"trade_price": 100, "timestamp": 0, "trade_volume": 1})
-    feed.update_from_tick("KRW-BTC", {"trade_price": 120, "timestamp": 60_000, "trade_volume": 2})
-    candle, rolled = feed.update_from_tick(
-        "KRW-BTC", {"trade_price": 90, "timestamp": 120_000, "trade_volume": 3}
-    )
-
-    assert opened is True
-    assert rolled is False
-    assert len(feed.candles("KRW-BTC")) == 1
-    assert (candle["open"], candle["high"], candle["low"], candle["close"]) == (100, 120, 90, 90)
-    assert candle["volume"] == 6
-
-
-def test_update_from_tick_opens_new_candle_on_bucket_rollover():
-    feed = CandleFeed(["KRW-BTC"])
-    feed.update_from_tick("KRW-BTC", {"trade_price": 100, "timestamp": 0, "trade_volume": 1})
-
-    candle, rolled = feed.update_from_tick(
-        "KRW-BTC", {"trade_price": 130, "timestamp": BUCKET_MS, "trade_volume": 1}
-    )
-
-    assert rolled is True
-    assert len(feed.candles("KRW-BTC")) == 2
-    assert candle["open"] == 130 and candle["ts"] == BUCKET_MS
-
-
-def test_update_from_tick_ignores_late_tick_from_closed_candle():
-    feed = CandleFeed(["KRW-BTC"])
-    feed.update_from_tick("KRW-BTC", {"trade_price": 100, "timestamp": 0})
-    feed.update_from_tick("KRW-BTC", {"trade_price": 130, "timestamp": BUCKET_MS})
-
-    feed.update_from_tick("KRW-BTC", {"trade_price": 999, "timestamp": 60_000})
-
-    closes = [candle["close"] for candle in feed.candles("KRW-BTC")]
-    assert closes == [100, 130]
-
-
-def test_update_from_tick_skips_payload_without_price_or_timestamp():
-    feed = CandleFeed(["KRW-BTC"])
-
-    assert feed.update_from_tick("KRW-BTC", {"timestamp": 0}) == (None, False)
-    assert feed.update_from_tick("KRW-BTC", {"trade_price": 100}) == (None, False)
-    assert feed.candles("KRW-BTC") == []
-
-
-def test_seed_keeps_only_the_newest_maxlen_candles():
-    feed = CandleFeed(["KRW-BTC"], maxlen=3)
-    feed.seed("KRW-BTC", make_candles([1, 2, 3, 4, 5]))
-
-    assert [candle["close"] for candle in feed.candles("KRW-BTC")] == [3, 4, 5]
+def make_store():
+    return RedisStore(client=_FakeRedis())
 
 
 # --- 개별 지표 판정 ----------------------------------------------------------
@@ -138,260 +70,230 @@ def test_classify_ma_trend_matches_scoring_table():
 def test_orderbook_imbalance_is_signed_ratio():
     assert compute_orderbook_imbalance(115, 85) == pytest.approx(0.15)
     assert compute_orderbook_imbalance(85, 115) == pytest.approx(-0.15)
-    assert compute_orderbook_imbalance(50, 50) == 0.0
     assert compute_orderbook_imbalance(0, 0) is None
-    assert compute_orderbook_imbalance(None, None) is None
 
 
 def test_volume_change_rate_compares_with_previous_candle():
-    import pandas as pd
-
     assert compute_volume_change_rate(pd.Series([100.0, 130.0])) == pytest.approx(0.3)
-    assert compute_volume_change_rate(pd.Series([100.0])) is None
     assert compute_volume_change_rate(pd.Series([0.0, 5.0])) is None
 
 
-def test_golden_cross_detected_only_on_the_crossing_candle():
-    import pandas as pd
+def test_bollinger_position_covers_every_enum_value():
+    # ai_signals.bollinger_position ENUM 과 값이 같아야 한다
+    assert classify_bollinger_position(5, 10, 15, 20) == BB_BELOW_LOWER
+    assert classify_bollinger_position(12, 10, 15, 20) == BB_LOWER_HALF
+    assert classify_bollinger_position(17, 10, 15, 20) == BB_UPPER_HALF
+    assert classify_bollinger_position(25, 10, 15, 20) == BB_ABOVE_UPPER
+    assert classify_bollinger_position(None, 10, 15, 20) is None
 
-    macd = pd.Series([-1.0, -0.5, 0.5, 1.0])
-    signal = pd.Series([0.0, 0.0, 0.0, 0.0])
 
-    assert calculator.detect_golden_cross(macd, signal) is False  # 이미 위에 있는 상태
-    assert calculator.detect_golden_cross(macd.iloc[:3], signal.iloc[:3]) is True
-    assert calculator.detect_golden_cross(macd.iloc[:2], signal.iloc[:2]) is False
+def test_cci_matches_the_textbook_formula():
+    """pandas_ta.cci 는 0.4.71b0 에서 부호와 크기가 어긋나 직접 구현했다."""
+    close = pd.Series([100 + i * 0.3 for i in range(60)])
+    high, low = close + 1, close - 1
+
+    typical = (high + low + close) / 3
+    sma = typical.rolling(20).mean()
+    mad = typical.rolling(20).apply(lambda w: abs(w - w.mean()).mean(), raw=True)
+    expected = ((typical - sma) / (0.015 * mad)).iloc[-1]
+
+    assert compute_cci(high, low, close).iloc[-1] == pytest.approx(expected)
+    # 상승 추세면 양수여야 한다
+    assert compute_cci(high, low, close).iloc[-1] > 0
+
+
+def test_cci_is_undefined_on_a_perfectly_flat_series():
+    flat = pd.Series([100.0] * 40)
+    assert pd.isna(compute_cci(flat + 1, flat - 1, flat).iloc[-1])
 
 
 # --- compute() 통합 ----------------------------------------------------------
 
 
 def test_compute_on_monotonic_rise_gives_overbought_rsi_and_bullish_ma():
-    candles = make_candles([100 + i for i in range(80)])
+    result = calculator.compute("BTC/USDT", make_candles([100 + i for i in range(80)]),
+                                {"total_bid_size": 115, "total_ask_size": 85})
 
-    result = calculator.compute("KRW-BTC", candles, {"total_bid_size": 115, "total_ask_size": 85})
-
-    assert result.market == "KRW-BTC"
-    assert result.candle_count == 80
-    assert result.close == 179
-    assert result.rsi == pytest.approx(100.0)  # 하락이 없으면 RSI는 100
+    assert result.rsi == pytest.approx(100.0)
     assert result.ma_trend == TREND_BULLISH
-    assert result.ma5 > result.ma20 > result.ma60
     assert result.orderbook_imbalance == pytest.approx(0.15)
-    assert result.candle_ts == 79 * BUCKET_MS
 
 
-def test_compute_on_monotonic_fall_gives_oversold_rsi_and_bearish_ma():
-    candles = make_candles([200 - i for i in range(80)])
+def test_compute_fills_all_four_new_indicators_with_enough_candles():
+    result = calculator.compute("BTC/USDT", make_candles([100 + math.sin(i / 4) * 8 for i in range(120)]))
 
-    result = calculator.compute("KRW-BTC", candles)
-
-    assert result.rsi == pytest.approx(0.0)
-    assert result.ma_trend == TREND_BEARISH
-    assert result.orderbook_imbalance is None  # 호가 스냅샷 없음
-
-
-def test_compute_returns_none_for_indicators_without_enough_candles():
-    result = calculator.compute("KRW-BTC", make_candles([100, 101, 102]))
-
-    assert result.candle_count == 3
-    assert result.rsi is None
-    assert result.macd is None
-    assert result.macd_golden_cross is False
-    assert result.ma5 is None and result.ma20 is None and result.ma60 is None
-    assert result.ma_trend == TREND_UNKNOWN
+    assert result.bb_lower < result.bb_mid < result.bb_upper
+    assert result.bollinger_position in {BB_BELOW_LOWER, BB_LOWER_HALF, BB_UPPER_HALF, BB_ABOVE_UPPER}
+    assert 0 <= result.stochastic_k <= 100
+    assert 0 <= result.stochastic_d <= 100
+    assert result.adx is not None
+    assert result.cci is not None
 
 
-def test_compute_tolerates_empty_candles():
-    result = calculator.compute("KRW-BTC", [])
+def test_adx_separates_trend_from_chop():
+    trending = calculator.compute("BTC/USDT", make_candles([100 + i * 0.5 for i in range(200)]))
+    choppy = calculator.compute("BTC/USDT", make_candles([100 + (i % 2) * 0.2 for i in range(200)]))
 
-    assert result.candle_count == 0
-    assert result.close is None
-    assert result.ma_trend == TREND_UNKNOWN
+    assert trending.adx > choppy.adx
+
+
+def test_new_indicators_are_none_before_warmup():
+    result = calculator.compute("BTC/USDT", make_candles([100, 101, 102]))
+
+    assert result.bb_mid is None
+    assert result.bollinger_position is None
+    assert result.stochastic_k is None
+    assert result.adx is None
+    assert result.cci is None
 
 
 def test_macd_appears_once_enough_candles_accumulate():
     closes = [100 + math.sin(i / 3) * 10 for i in range(MIN_MACD_CANDLES + 5)]
+    result = calculator.compute("BTC/USDT", make_candles(closes))
 
-    result = calculator.compute("KRW-BTC", make_candles(closes))
-
-    assert result.macd is not None
-    assert result.macd_signal is not None
     assert result.macd_hist == pytest.approx(result.macd - result.macd_signal)
 
 
 def test_as_dict_is_json_serializable_for_redis():
-    result = calculator.compute("KRW-BTC", make_candles([100 + i for i in range(60)]))
+    result = calculator.compute("BTC/USDT", make_candles([100 + i for i in range(120)]))
 
     payload = json.loads(json.dumps(result.as_dict()))
-    assert payload["market"] == "KRW-BTC"
     assert payload["ma_trend"] == TREND_BULLISH
+    assert "cci" in payload and "adx" in payload
 
 
-# --- 이벤트 파이프라인 -------------------------------------------------------
-
-
-class _FakePipeline:
-    def __init__(self, store):
-        self._store = store
-        self._ops = []
-
-    def delete(self, key):
-        self._ops.append(("delete", key))
-        return self
-
-    def rpush(self, key, *values):
-        self._ops.append(("rpush", key, values))
-        return self
-
-    def expire(self, key, ttl):
-        self._ops.append(("expire", key, ttl))
-        return self
-
-    async def execute(self):
-        for op in self._ops:
-            if op[0] == "delete":
-                self._store.lists.pop(op[1], None)
-            elif op[0] == "rpush":
-                self._store.lists.setdefault(op[1], []).extend(op[2])
-            elif op[0] == "expire":
-                self._store.ttls[op[1]] = op[2]
-        self._ops.clear()
-
-
-class _FakeRedis:
-    def __init__(self):
-        self.strings = {}
-        self.lists = {}
-        self.ttls = {}
-
-    async def set(self, key, value, ex=None):
-        self.strings[key] = value
-        self.ttls[key] = ex
-
-    def pipeline(self):
-        return _FakePipeline(self)
+# --- 거래소별 지표 엔진 ------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_save_candles_replaces_list_with_ttl():
+async def test_engine_computes_per_exchange_and_symbol():
     fake = _FakeRedis()
-    store = RedisStore(client=fake, candle_ttl=3600)
+    engine = IndicatorEngine(RedisStore(client=fake), min_interval_sec=0.0)
+    candles = make_candles([100 + i for i in range(80)])
 
-    await store.save_candles("KRW-BTC", make_candles([1, 2]))
-    await store.save_candles("KRW-BTC", make_candles([3]))
+    await engine.handle_event("candle", "binance", "BTC/USDT", {"candles": candles})
+    await engine.handle_event("candle", "upbit", "BTC/KRW", {"candles": candles})
 
-    key = candles_key("KRW-BTC")
-    assert key == "market:KRW-BTC:candles:5m"
-    assert [json.loads(row)["close"] for row in fake.lists[key]] == [3]
-    assert fake.ttls[key] == 3600
+    assert set(engine.latest) == {("binance", "BTC/USDT"), ("upbit", "BTC/KRW")}
+    assert exchange_key("binance", "BTC/USDT", "indicators") in fake.strings
+    assert exchange_key("upbit", "BTC/KRW", "indicators") in fake.strings
 
 
 @pytest.mark.asyncio
-async def test_engine_recalculates_and_publishes_to_handlers():
-    fake = _FakeRedis()
-    store = RedisStore(client=fake, indicator_ttl=300)
-    feed = CandleFeed(["KRW-BTC"])
-    feed.seed("KRW-BTC", make_candles([100 + i for i in range(60)]))
-    engine = IndicatorEngine(store, feed, min_interval_sec=0.0)
+async def test_engine_merges_orderbook_into_indicators():
+    engine = IndicatorEngine(make_store(), min_interval_sec=0.0)
+    candles = make_candles([100 + i for i in range(80)])
 
-    seen = []
-    engine.on_indicators(lambda market, indicators: seen.append((market, indicators)) or _noop())
+    await engine.handle_event("orderbook", "binance", "BTC/USDT",
+                              {"total_bid_size": 115, "total_ask_size": 85})
+    await engine.handle_event("candle", "binance", "BTC/USDT", {"candles": candles})
 
-    await engine.handle_event(
-        "orderbook", "KRW-BTC", {"total_bid_size": 115, "total_ask_size": 85}
-    )
-
-    assert len(seen) == 1
-    market, indicators = seen[0]
-    assert market == "KRW-BTC"
-    assert indicators.orderbook_imbalance == pytest.approx(0.15)
-    assert engine.latest["KRW-BTC"] is indicators
-
-    cached = json.loads(fake.strings[indicators_key("KRW-BTC")])
-    assert cached["ma_trend"] == TREND_BULLISH
-    assert fake.ttls[indicators_key("KRW-BTC")] == 300
-
-
-async def _noop():
-    return None
+    assert engine.latest[("binance", "BTC/USDT")].orderbook_imbalance == pytest.approx(0.15)
 
 
 @pytest.mark.asyncio
-async def test_engine_throttles_recalculation_between_ticks():
-    fake = _FakeRedis()
-    feed = CandleFeed(["KRW-BTC"])
-    feed.seed("KRW-BTC", make_candles([100 + i for i in range(60)]))
-    engine = IndicatorEngine(RedisStore(client=fake), feed, min_interval_sec=60.0)
+async def test_engine_ignores_candle_event_without_candles():
+    engine = IndicatorEngine(make_store(), min_interval_sec=0.0)
 
-    calls = []
-    engine.on_indicators(lambda market, indicators: calls.append(market) or _noop())
+    await engine.handle_event("candle", "binance", "BTC/USDT", {"candles": []})
 
-    # 같은 봉 안에서 연달아 들어온 틱은 첫 건만 계산한다.
-    base = 60 * BUCKET_MS
-    for offset in range(3):
-        await engine.handle_event(
-            "ticker", "KRW-BTC", {"trade_price": 160, "timestamp": base + offset, "trade_volume": 1}
-        )
-
-    assert calls == ["KRW-BTC"]
-
-
-@pytest.mark.asyncio
-async def test_engine_forces_recalculation_when_candle_rolls_over():
-    fake = _FakeRedis()
-    feed = CandleFeed(["KRW-BTC"])
-    feed.seed("KRW-BTC", make_candles([100 + i for i in range(60)]))
-    engine = IndicatorEngine(RedisStore(client=fake), feed, min_interval_sec=60.0)
-
-    calls = []
-    engine.on_indicators(lambda market, indicators: calls.append(market) or _noop())
-
-    await engine.handle_event(
-        "ticker", "KRW-BTC", {"trade_price": 160, "timestamp": 60 * BUCKET_MS, "trade_volume": 1}
-    )
-    # 스로틀 구간이지만 새 봉이 열리면 즉시 계산한다.
-    await engine.handle_event(
-        "ticker", "KRW-BTC", {"trade_price": 161, "timestamp": 61 * BUCKET_MS, "trade_volume": 1}
-    )
-
-    assert calls == ["KRW-BTC", "KRW-BTC"]
-    assert fake.lists[candles_key("KRW-BTC")]  # 봉이 닫힐 때 캔들도 저장된다
+    assert engine.latest == {}
 
 
 @pytest.mark.asyncio
 async def test_engine_survives_handler_failure():
-    feed = CandleFeed(["KRW-BTC"])
-    feed.seed("KRW-BTC", make_candles([100 + i for i in range(60)]))
-    engine = IndicatorEngine(RedisStore(client=_FakeRedis()), feed, min_interval_sec=0.0)
-
-    async def boom(market, indicators):
-        raise RuntimeError("룰 엔진 폭발")
-
+    engine = IndicatorEngine(make_store(), min_interval_sec=0.0)
     ok = []
 
-    async def fine(market, indicators):
-        ok.append(market)
+    async def boom(exchange, symbol, indicators):
+        raise RuntimeError("룰 엔진 폭발")
+
+    async def fine(exchange, symbol, indicators):
+        ok.append(exchange)
 
     engine.on_indicators(boom)
     engine.on_indicators(fine)
+    await engine.handle_event("candle", "binance", "BTC/USDT",
+                              {"candles": make_candles([100 + i for i in range(30)])})
 
-    await engine.handle_event("orderbook", "KRW-BTC", {"total_bid_size": 1, "total_ask_size": 1})
+    assert ok == ["binance"]
 
-    assert ok == ["KRW-BTC"]
+
+# --- 글로벌 가중 집계 --------------------------------------------------------
+
+
+def test_weighted_average_uses_weights():
+    assert weighted_average([(100.0, 3.0), (200.0, 1.0)]) == pytest.approx(125.0)
+
+
+def test_weighted_average_falls_back_to_plain_mean_without_weights():
+    assert weighted_average([(100.0, 0.0), (200.0, 0.0)]) == pytest.approx(150.0)
+
+
+def test_weighted_average_skips_none_values():
+    assert weighted_average([(None, 5.0), (50.0, 1.0)]) == pytest.approx(50.0)
+
+
+def test_base_of_strips_quote_currency():
+    assert base_of("BTC/USDT") == "BTC"
+    assert base_of("BTC/KRW") == "BTC"
+
+
+def make_indicators(close):
+    """마지막 종가가 정확히 `close` 가 되는 상승 캔들로 지표를 만든다."""
+    return calculator.compute("X", make_candles([close - 79 + i for i in range(80)]))
 
 
 @pytest.mark.asyncio
-async def test_prime_fills_candles_and_indicators_before_first_tick():
+async def test_global_price_excludes_krw_quoted_upbit():
+    """업비트는 KRW 라 평균에 섞으면 안 된다 (BTC 1억원 vs 7만달러)."""
     fake = _FakeRedis()
-    feed = CandleFeed(["KRW-BTC", "KRW-ETH"])
-    feed.seed("KRW-BTC", make_candles([100 + i for i in range(60)]))
-    # KRW-ETH는 시딩에 실패한 마켓 — 건너뛰고 나머지를 처리해야 한다.
-    engine = IndicatorEngine(RedisStore(client=fake), feed, min_interval_sec=0.0)
+    manager = MarketManager(RedisStore(client=fake))
 
-    await engine.prime()
+    manager.record_ticker("binance", "BTC/USDT", {"quote_volume_24h": 1000.0})
+    manager.record_ticker("upbit", "BTC/KRW", {"quote_volume_24h": 9_999_999.0})
+    manager.record_indicators("binance", "BTC/USDT", make_indicators(100.0))
+    manager.record_indicators("upbit", "BTC/KRW", make_indicators(100_000_000.0))
 
-    assert len(fake.lists[candles_key("KRW-BTC")]) == 60
-    assert json.loads(fake.strings[indicators_key("KRW-BTC")])["ma_trend"] == TREND_BULLISH
-    assert candles_key("KRW-ETH") not in fake.lists
-    assert indicators_key("KRW-ETH") not in fake.strings
-    assert set(engine.latest) == {"KRW-BTC"}
+    snapshot = await manager.publish("BTC")
+
+    assert snapshot["sources"] == ["binance"]
+    assert snapshot["price"] == pytest.approx(100.0)
+    # 버려지지 않고 따로 실린다
+    assert snapshot["upbit_price"] == pytest.approx(100_000_000.0)
+    assert json.loads(fake.strings[global_key("BTC", "price")])["source_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_global_price_is_volume_weighted_across_usd_exchanges():
+    manager = MarketManager(make_store())
+    manager.record_ticker("binance", "BTC/USDT", {"quote_volume_24h": 3.0})
+    manager.record_ticker("okx", "BTC/USDT", {"quote_volume_24h": 1.0})
+    manager.record_indicators("binance", "BTC/USDT", make_indicators(100.0))
+    manager.record_indicators("okx", "BTC/USDT", make_indicators(200.0))
+
+    snapshot = await manager.publish("BTC")
+
+    assert snapshot["price"] == pytest.approx(125.0)  # (100*3 + 200*1) / 4
+    assert snapshot["source_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_global_aggregate_separates_symbols():
+    manager = MarketManager(make_store())
+    manager.record_ticker("binance", "BTC/USDT", {"quote_volume_24h": 1.0})
+    manager.record_ticker("binance", "ETH/USDT", {"quote_volume_24h": 1.0})
+    manager.record_indicators("binance", "BTC/USDT", make_indicators(100.0))
+    manager.record_indicators("binance", "ETH/USDT", make_indicators(50.0))
+
+    assert manager.aggregate("BTC")["price"] == pytest.approx(100.0)
+    assert manager.aggregate("ETH")["price"] == pytest.approx(50.0)
+
+
+@pytest.mark.asyncio
+async def test_global_aggregate_returns_none_without_usd_sources():
+    manager = MarketManager(make_store())
+    manager.record_indicators("upbit", "BTC/KRW", make_indicators(100_000_000.0))
+
+    assert manager.aggregate("BTC") is None
+    assert await manager.publish("BTC") is None

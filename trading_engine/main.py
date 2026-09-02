@@ -1,11 +1,7 @@
 """Trading Engine 엔트리포인트.
 
-현재 단계: Step 1-a — ccxt 다중 거래소 수집 + Upbit 지표 계산.
-
-수집 경로가 둘이다. Upbit 은 전용 WebSocket(캔들·지표까지), 나머지 거래소는
-ccxt ExchangeFeed(ticker·orderbook 만). Step 1-b 에서 지표를 거래소별로 돌리면서
-Upbit 도 ccxt 경로로 합친다 — 그래서 지금은 EXCHANGES 기본값에 upbit 이 없다
-(넣으면 같은 데이터를 두 번 수집한다).
+현재 단계: Step 1 — ccxt 다중 거래소 수집 + 거래소별 지표 + 글로벌 가중 평균.
+Step 2(Consensus·RuleEngine·OpenAI)는 indicator_engine.on_indicators() 로 붙인다.
 """
 
 from __future__ import annotations
@@ -18,32 +14,18 @@ import signal
 from trading_engine.config import settings
 from trading_engine.indicators.calculator import Indicators
 from trading_engine.indicators.engine import IndicatorEngine
-from trading_engine.market.candle_feed import CandleFeed
 from trading_engine.market.exchange_feed import ExchangeFeed
 from trading_engine.market.exchange_registry import resolve_specs
+from trading_engine.market.market_manager import MarketManager, base_of
 from trading_engine.market.redis_store import RedisStore
-from trading_engine.market.upbit_ws import UpbitWebSocketClient
 
-log = logging.getLogger("trading_engine")
+log = logging.getLogger(__name__)
 
 
 def setup_logging() -> None:
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
-
-
-async def log_indicators(market: str, indicators: Indicators) -> None:
-    """Step 2의 룰 엔진이 들어오기 전까지 자리를 지키는 기본 핸들러."""
-    log.debug(
-        "지표 갱신 market=%s close=%s rsi=%s macd_cross=%s ma_trend=%s imbalance=%s",
-        market,
-        indicators.close,
-        indicators.rsi,
-        indicators.macd_golden_cross,
-        indicators.ma_trend,
-        indicators.orderbook_imbalance,
     )
 
 
@@ -56,32 +38,45 @@ async def run() -> None:
         log.exception("Redis 연결 실패 - 설정(.env)을 확인하라")
         raise
 
-    feed = CandleFeed(settings.markets)
-    seeded = await feed.seed_all()
-    log.info("캔들 시딩 %d/%d 마켓", seeded, len(settings.markets))
+    manager = MarketManager(store)
+    indicator_engine = IndicatorEngine(store)
 
-    indicator_engine = IndicatorEngine(store, feed)
-    indicator_engine.on_indicators(log_indicators)
-    await indicator_engine.prime()
+    async def on_indicators(exchange: str, symbol: str, indicators: Indicators) -> None:
+        """거래소 지표가 갱신될 때마다 글로벌 집계를 다시 낸다."""
+        manager.record_indicators(exchange, symbol, indicators)
+        snapshot = await manager.publish(base_of(symbol))
+        if snapshot:
+            log.debug(
+                "글로벌 갱신 %s price=%s sources=%d rsi=%s",
+                snapshot["symbol"],
+                snapshot["price"],
+                snapshot["source_count"],
+                snapshot["rsi"],
+            )
 
-    client = UpbitWebSocketClient(store)
-    client.on_event(indicator_engine.handle_event)
+    indicator_engine.on_indicators(on_indicators)
+
+    async def on_market_event(event_type: str, exchange: str, symbol: str, payload: dict) -> None:
+        # 가중치(24h 거래대금)는 ticker 에서만 온다.
+        if event_type == "ticker":
+            manager.record_ticker(exchange, symbol, payload)
+        await indicator_engine.handle_event(event_type, exchange, symbol, payload)
 
     # 거래소 코드 오타는 여기서 즉시 걸린다. 수집을 시작한 뒤에 알면 늦다.
-    exchange_feeds = [
-        ExchangeFeed(spec, store, settings.symbols)
-        for spec in resolve_specs(settings.exchanges)
+    feeds = [
+        ExchangeFeed(spec, store, settings.symbols) for spec in resolve_specs(settings.exchanges)
     ]
-    if exchange_feeds:
-        log.info(
-            "ccxt 수집 거래소: %s (심볼 %s)",
-            ", ".join(feed.code for feed in exchange_feeds),
-            ", ".join(settings.symbols),
-        )
+    for feed in feeds:
+        feed.on_event(on_market_event)
+
+    log.info(
+        "수집 거래소: %s / 심볼: %s",
+        ", ".join(feed.code for feed in feeds),
+        ", ".join(settings.symbols),
+    )
 
     def stop_all() -> None:
-        client.stop()
-        for feed in exchange_feeds:
+        for feed in feeds:
             feed.stop()
 
     loop = asyncio.get_running_loop()
@@ -91,10 +86,7 @@ async def run() -> None:
 
     try:
         # 거래소별로 독립된 태스크다. 하나가 죽어도 나머지는 계속 수집한다.
-        await asyncio.gather(
-            client.run_forever(),
-            *[feed.run() for feed in exchange_feeds],
-        )
+        await asyncio.gather(*[feed.run() for feed in feeds])
     finally:
         await store.close()
 
