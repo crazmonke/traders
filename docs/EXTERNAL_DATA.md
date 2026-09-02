@@ -225,3 +225,18 @@ events = as_of.upcoming_events(t, within="24h")      # scheduled_at > t
 편입 방식은 두 가지다. `Final Score`는 Tech 45 + Consensus 20 + AI 20 + Risk 15 = 100이라
 새 항목을 넣으려면 재배분이 필요하다. 그보다 **AI 20% 안에 컨텍스트로 넣는 쪽**이
 스키마·가중치를 건드리지 않아 훨씬 싸다. D단계에서 정한다.
+
+## OpenAI 호환 엔드포인트 (2026-09-02 확정)
+
+이 프로젝트는 OpenAI 본사가 아니라 **카페24 LLM Router**(OpenAI 호환 프록시)를 쓴다.
+
+- base_url: `https://llm-router.cafe24.com/api/v1`
+- 키 형식: `sk-cafe24-` + 64 hex (74자)
+- 콘솔·문서: https://llm-router.cafe24.com/docs
+
+`OPENAI_BASE_URL` 을 비워두면 SDK 가 OpenAI 본사로 요청을 보내 `401 Incorrect API key`
+가 된다. 키가 잘못된 것처럼 보이지만 원인은 엔드포인트다.
+
+라우터는 OpenAI 외에 Anthropic·Google·DeepSeek 모델도 같은 인터페이스로 제공한다
+(총 248개, `cafe24/auto` 자동 라우팅 포함). 모델을 바꿀 때 SDK 코드는 그대로 두고
+모델명만 갈아끼우면 된다.
