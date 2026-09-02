@@ -11,7 +11,7 @@ import logging
 import random
 from typing import Any, Awaitable, Callable
 
-from ccxt.base.errors import NotSupported
+from ccxt.base.errors import NetworkError, NotSupported
 
 from trading_engine.market.exchange_registry import ExchangeSpec, create_client
 from trading_engine.market.redis_store import RedisStore
@@ -27,6 +27,8 @@ CANDLE_TIMEFRAME = "5m"
 CANDLE_LIMIT = 100  # prompt.md v2 [Step 1] 요구사항 5 — 최근 100봉
 # watchOHLCV 를 지원하지 않는 거래소(coinbase)는 이 주기로 다시 받아온다.
 CANDLE_POLL_SEC = 20.0
+# 채널 하나가 일시적으로 끊겼을 때 그 채널만 쉬었다 재시도하는 간격
+CHANNEL_RETRY_SEC = 2.0
 
 Handler = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
 """(event_type, exchange_code, symbol, payload) 를 받는 비동기 핸들러."""
@@ -197,6 +199,9 @@ class ExchangeFeed:
         if candles:
             await self._store_candles(symbol, candles)
             log.info("%s %s 캔들 시딩 완료 (%d봉)", self.code, symbol, len(candles))
+            # 여기서 이벤트를 쏘지 않으면 폴링 경로(upbit·coinbase)는 첫 폴링까지
+            # 지표가 비어 있다. 시딩한 100봉으로 지표는 이미 낼 수 있다.
+            await self._dispatch("candle", symbol, {"symbol": symbol, "candles": candles})
 
     async def _follow_candles(self, client: Any, symbol: str) -> None:
         """watchOHLCV 로 구독하고, 안 되면 REST 폴링으로 물러선다.
@@ -243,19 +248,43 @@ class ExchangeFeed:
         self.candles[symbol] = candles
         await self._store.save_exchange_candles(self.code, symbol, candles, CANDLE_TIMEFRAME)
 
-    async def _watch_ticker(self, client: Any, symbol: str) -> None:
+    async def _tolerate_drops(self, channel: str, symbol: str, step) -> None:
+        """채널 하나의 일시적 끊김을 거래소 전체 재접속으로 키우지 않는다.
+
+        거래소는 유휴 연결을 정상 종료(code 1000)로 끊는다. 그 예외가 gather 밖으로
+        나가면 같은 거래소의 다른 채널까지 전부 접혔다가 다시 붙는데, 그러면 캔들
+        폴링 주기(20초)에 도달하기 전에 계속 리셋돼 지표가 영영 안 나온다.
+        2026-09-02 upbit 에서 실제로 발생.
+
+        네트워크 계열이 아닌 예외는 그대로 올려보내 거래소 단위 백오프를 태운다.
+        """
         while not self._stopping.is_set():
+            try:
+                await step()
+            except NetworkError as exc:
+                log.info(
+                    "%s %s %s 채널 일시 끊김 - %.0f초 후 재시도 (%s)",
+                    self.code, symbol, channel, CHANNEL_RETRY_SEC, exc,
+                )
+                await asyncio.sleep(CHANNEL_RETRY_SEC)
+
+    async def _watch_ticker(self, client: Any, symbol: str) -> None:
+        async def step() -> None:
             raw = await client.watch_ticker(symbol)
             payload = normalize_ticker(self._spec, raw)
             await self._store.save_exchange_ticker(self.code, symbol, payload)
             await self._dispatch("ticker", symbol, payload)
 
+        await self._tolerate_drops("ticker", symbol, step)
+
     async def _watch_orderbook(self, client: Any, symbol: str) -> None:
-        while not self._stopping.is_set():
+        async def step() -> None:
             raw = await client.watch_order_book(symbol)
             payload = normalize_orderbook(self._spec, raw, self._depth)
             await self._store.save_exchange_orderbook(self.code, symbol, payload)
             await self._dispatch("orderbook", symbol, payload)
+
+        await self._tolerate_drops("orderbook", symbol, step)
 
     async def _dispatch(self, event_type: str, symbol: str, payload: dict[str, Any]) -> None:
         for handler in self._handlers:

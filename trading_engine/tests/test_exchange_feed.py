@@ -257,7 +257,9 @@ async def test_feed_survives_handler_failure():
     feed.on_event(fine)
     await run_briefly(feed)
 
-    assert ok == ["binance"]
+    # 시딩(candle)과 ticker 각각에 대해, 앞 핸들러가 터져도 뒤 핸들러가 돈다
+    assert len(ok) >= 2
+    assert set(ok) == {"binance"}
 
 
 @pytest.mark.asyncio
