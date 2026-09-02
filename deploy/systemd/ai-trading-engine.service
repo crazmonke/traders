@@ -1,20 +1,33 @@
-# Python 매매 엔진(WebSocket 수집/Rule Engine) 상시 구동용 systemd 유닛 템플릿
-# 서버가 정해지면 /etc/systemd/system/ai-trading-engine.service 로 복사 후:
+# Python 매매 엔진(다중 거래소 수집 / 지표 / Rule Engine) 상시 구동 유닛.
+#
+# 최초 1회만 서버에서:
+#   sudo cp deploy/systemd/ai-trading-engine.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now ai-trading-engine
+#
+# 이후 배포는 remote_deploy.sh 가 자동으로 restart 한다.
+# 유닛이 등록돼 있지 않으면 배포는 경고만 남기고 넘어가므로, 코드는 올라가는데
+# 아무것도 실행되지 않는 상태가 된다. 위 3줄을 반드시 한 번 수행할 것.
 
 [Unit]
 Description=AI Trading Python Engine
-After=network.target mysql.service redis-server.service
+# Redis/MySQL 은 도커 컨테이너로 뜬다.
+After=network-online.target docker.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=REPLACE_WITH_DEPLOY_USER
-WorkingDirectory=/var/www/ai-trading/trading_engine
-EnvironmentFile=/var/www/ai-trading/.env
-ExecStart=/var/www/ai-trading/trading_engine/venv/bin/python main.py
+User=root
+# 패키지 루트에서 -m 으로 띄운다. trading_engine/ 안에서 main.py 를 직접 실행하면
+# `from trading_engine.config import ...` 가 ModuleNotFoundError 로 죽는다.
+WorkingDirectory=/var/www/traders
+ExecStart=/var/www/traders/trading_engine/venv/bin/python -m trading_engine.main
+# .env 는 config.py 가 python-dotenv 로 직접 읽는다. systemd EnvironmentFile 로
+# 이중 로딩하면 주석/따옴표 파싱 차이로 기동이 실패할 수 있어 쓰지 않는다.
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
