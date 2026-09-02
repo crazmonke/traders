@@ -33,6 +33,12 @@
 | 지표 | RSI/MACD/MA/호가불균형 | + Bollinger/Stochastic/ADX/CCI |
 | 판정 | "완료 (2026-09-01)" | **부분 재사용 — Upbit 어댑터는 그대로 두고, 거래소 어댑터 추상화 + 4개 거래소 추가 필요** |
 
+**Step 1-a 완료 (2026-09-02, 9/3 예정분 선행)** — `market/exchange_registry.py`(5개 거래소 스펙 +
+ccxt.pro 팩토리), `market/exchange_feed.py`(거래소별 독립 태스크·지수 백오프·이벤트 훅),
+Redis `exchange:{code}:{symbol}:ticker|orderbook` 키. Binance/OKX 실수집 검증 완료. 테스트 47건.
+시세 수집에는 거래소 API 키가 필요 없음을 5개 거래소 실측으로 확인했다(키는 Step 5 업비트 매매용만).
+남은 것: Upbit 은 아직 전용 WebSocket 경로가 담당한다 — 지표를 거래소별로 돌리는 Step 1-b 에서 합친다.
+
 Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다중 거래소 어댑터 구조로 리팩터링 + 4개 거래소 추가"** 로 처리한다. 기존 Upbit WebSocket/지표 코드는 `market/upbit_rest.py` 등에서 `market/exchange_registry.py` + `ccxt.pro` 기반 공통 인터페이스로 옮긴다.
 
 ## 스텝 목록 (v2)
@@ -96,7 +102,7 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | 9/1 (화) | ~~[v1] Upbit WebSocket 수집 + Redis 캐싱~~ 완료 (다중 거래소 어댑터로 재사용) |
 | 9/1 (화) | ~~[v1] 지표 계산(RSI/MACD/MA/호가불균형) + 재접속 백오프~~ 완료 (재사용) |
 | 9/2 (수) | ~~Step 0 — DB 마이그레이션 (exchanges, user_webhooks, external_signals, users.locale, ai_signals 컬럼 추가)~~ 완료 |
-| 9/3 (목) | Step 1-a — ccxt 거래소 어댑터 추상화 + Binance/OKX 추가 |
+| 9/3 (목) | ~~Step 1-a — ccxt 거래소 어댑터 추상화 + Binance/OKX 추가~~ 9/2 선행 완료 |
 | 9/4 (금) | Step 1-b — Bybit/Coinbase 추가 + 지표 4종(Bollinger/Stochastic/ADX/CCI) + 글로벌 가중 평균 |
 | 9/5 (토) | Step 2-a — Consensus 계산 + RuleEngine 재작성 |
 | 9/6 (일) | Step 2-b — OpenAI 연동 + `ai_signals` 저장/publish |

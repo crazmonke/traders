@@ -4,7 +4,11 @@
     market:{code}:ticker      -> String(JSON)
     market:{code}:orderbook   -> String(JSON)
     market:{code}:candles:5m  -> List(JSON 요소, 오래된 봉부터)
-    market:{code}:indicators  -> String(JSON)  # Step 1-b 산출물
+    market:{code}:indicators  -> String(JSON)
+
+v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
+    exchange:{code}:{symbol}:ticker    -> String(JSON)
+    exchange:{code}:{symbol}:orderbook -> String(JSON)
 """
 
 from __future__ import annotations
@@ -31,6 +35,11 @@ def candles_key(market: str, interval: str = "5m") -> str:
 
 def indicators_key(market: str) -> str:
     return f"market:{market}:indicators"
+
+
+def exchange_key(exchange: str, symbol: str, kind: str) -> str:
+    """거래소별 키. 심볼의 '/' 는 Redis 키에서 보기 나쁘므로 '-' 로 바꾼다."""
+    return f"exchange:{exchange}:{symbol.replace('/', '-')}:{kind}"
 
 
 class RedisStore:
@@ -65,6 +74,16 @@ class RedisStore:
 
     async def save_orderbook(self, market: str, payload: dict[str, Any]) -> None:
         await self._set_json(orderbook_key(market), payload)
+
+    async def save_exchange_ticker(
+        self, exchange: str, symbol: str, payload: dict[str, Any]
+    ) -> None:
+        await self._set_json(exchange_key(exchange, symbol, "ticker"), payload)
+
+    async def save_exchange_orderbook(
+        self, exchange: str, symbol: str, payload: dict[str, Any]
+    ) -> None:
+        await self._set_json(exchange_key(exchange, symbol, "orderbook"), payload)
 
     async def save_indicators(self, market: str, payload: dict[str, Any]) -> None:
         await self._set_json(indicators_key(market), payload, ttl=self._indicator_ttl)
