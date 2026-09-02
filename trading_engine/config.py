@@ -42,6 +42,14 @@ class Settings:
     # 캔들·지표는 5분봉 기준이라 틱보다 갱신이 뜸하다. TTL을 따로 준다.
     candle_cache_ttl_sec: int = int(os.getenv("MARKET_CANDLE_TTL_SEC", "3600"))
     indicator_cache_ttl_sec: int = int(os.getenv("MARKET_INDICATOR_TTL_SEC", "300"))
+    db_host: str = os.getenv("DB_HOST", "127.0.0.1")
+    db_port: int = int(os.getenv("DB_PORT", "3306"))
+    db_name: str = os.getenv("DB_DATABASE", "ai_trading")
+    db_user: str = os.getenv("DB_USERNAME", "ai_trading")
+    db_password: str = os.getenv("DB_PASSWORD", "")
+    # 뉴스 수집 주기(초). RSS 는 분 단위로도 충분하고, 너무 잦으면 매체에 실례다.
+    news_poll_sec: int = int(os.getenv("NEWS_POLL_SEC", "300"))
+    fred_api_key: str | None = os.getenv("FRED_API_KEY") or None
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 

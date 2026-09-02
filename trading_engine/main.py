@@ -12,6 +12,7 @@ import logging
 import signal
 
 from trading_engine.config import settings
+from trading_engine.external.news import collector as news_collector
 from trading_engine.indicators.calculator import Indicators
 from trading_engine.indicators.engine import IndicatorEngine
 from trading_engine.market.exchange_feed import ExchangeFeed
@@ -84,9 +85,19 @@ async def run() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop_all)
 
+    tasks = [feed.run() for feed in feeds]
+
+    # 뉴스 아카이브(Step 11-a). 신호 점수에는 영향을 주지 않는다.
+    # 수집이 실패해도 예외를 밖으로 내지 않으므로 시세 수집을 멈추지 않는다.
+    # NEWS_POLL_SEC=0 으로 끌 수 있다.
+    if settings.news_poll_sec > 0:
+        tasks.append(news_collector.run_forever())
+    else:
+        log.info("뉴스 수집 비활성 (NEWS_POLL_SEC=0)")
+
     try:
         # 거래소별로 독립된 태스크다. 하나가 죽어도 나머지는 계속 수집한다.
-        await asyncio.gather(*[feed.run() for feed in feeds])
+        await asyncio.gather(*tasks)
     finally:
         await store.close()
 
