@@ -36,6 +36,9 @@ push to main
                (HTTP 200 + status=ok, DB·Redis 연결까지 검사, 최대 10회 재시도)
 ```
 
+> **스키마 변경이 포함된 배포**는 위 흐름에 마이그레이션이 들어 있지 않습니다.
+> 푸시 후 서버에서 `./database/migrate.sh`를 직접 실행하세요. (`database/README.md`)
+
 테스트가 실패하면 배포되지 않습니다. 긴급 배포는 Actions 탭 → **Deploy** → *Run workflow* → `skip_tests` 체크.
 
 ## 설정 상태

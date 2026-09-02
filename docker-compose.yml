@@ -11,7 +11,10 @@ services:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # 최초 기동 시 01(v1 스키마) → 02(마이그레이션) 순으로 실행된다
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./database/migrations:/docker-entrypoint-initdb.d/migrations:ro
+      - ./database/docker_initdb_migrate.sh:/docker-entrypoint-initdb.d/02_migrate.sh:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s

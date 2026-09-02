@@ -50,9 +50,24 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | [ ] | **9** | 대시보드 UI (신호 목록·상세·차트, 거래소 합의율 표시) | 0% — `api/public/index.html`은 정적 안내 페이지 | |
 | [ ] | **10** | 다국어 지원 (ko/en/ja, 확장 가능 구조) | 0% — 신규, `lang/` 디렉터리 없음 | |
 
-## Step 0 — DB 마이그레이션 (신규, 착수 전 필수)
+## Step 0 — DB 마이그레이션 (신규, 착수 전 필수) — **완료 2026-09-02**
 
 기존 `database/init.sql`(v1 DDL)이 이미 있으므로, 전체 재작성 대신 마이그레이션 스크립트를 추가한다.
+
+**산출물**: `database/migrations/001_v2_multi_exchange.sql`, `database/migrate.sh`(러너),
+`database/docker_initdb_migrate.sh`(신규 설치 시 자동 적용), `database/README.md`.
+적용 이력은 `schema_migrations` 테이블로 추적한다. MySQL 8.0 컨테이너에서
+기존 DB 경로·신규 설치 경로 양쪽으로 적용을 검증했다.
+
+**미결(스펙 충돌, 결정 필요)**: 아래 3건은 `prompt.md` v2 §2 DDL과 기존 스키마가 어긋나
+이번 마이그레이션에서 손대지 않았다. 결정 후 `002_*.sql`로 처리한다.
+1. `ai_signals` 점수 컬럼 — v1은 `tech_score`/`ai_score`/`risk_score`/`final_score` 4개,
+   v2 §2 DDL은 `score` 1개. Step 2 DoD가 Final Score 구성비를 요구하므로 4개를 유지했다.
+2. `ai_signal_results` 구조 — v1은 horizon별 행(`UNIQUE(signal_id, horizon)`),
+   v2 §2 DDL은 `price_after_5m/15m/1h` 가로 컬럼. Step 7 DoD의
+   `INSERT ... ON DUPLICATE KEY UPDATE`는 v1 구조를 전제한다. v1 유지.
+3. `trading_safety_state` — v2 §2 DDL에 없으나 Step 5 DoD가
+   `kill_switch_active`/`max_position_size_krw`를 요구한다. v1 그대로 유지.
 
 - **DoD**: `exchanges`, `user_webhooks`, `external_signals`(user_id/user_webhook_id 포함) 테이블 신규 생성. `users`에 `locale`(기본값 'ko') 컬럼 추가. `ai_signals`에 `entry_price_global`, `entry_price_upbit`, `bollinger_position`, `stochastic_k`, `stochastic_d`, `adx_val`, `cci_val`, `exchange_consensus_pct`, `data_sources_json` 컬럼 추가하고 기존 `market` 컬럼은 `symbol`로 정리(거래소 무관 심볼). `backtest_logs`에 `reference_exchange` 컬럼 추가. 마이그레이션은 `database/migrations/`에 순번 파일로 관리하며, 기존 데이터가 없는 상태이므로 롤백 스크립트는 생략 가능.
 
@@ -80,7 +95,7 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | --- | --- |
 | 9/1 (화) | ~~[v1] Upbit WebSocket 수집 + Redis 캐싱~~ 완료 (다중 거래소 어댑터로 재사용) |
 | 9/1 (화) | ~~[v1] 지표 계산(RSI/MACD/MA/호가불균형) + 재접속 백오프~~ 완료 (재사용) |
-| 9/2 (수) | Step 0 — DB 마이그레이션 (exchanges, user_webhooks, external_signals, users.locale, ai_signals 컬럼 추가) |
+| 9/2 (수) | ~~Step 0 — DB 마이그레이션 (exchanges, user_webhooks, external_signals, users.locale, ai_signals 컬럼 추가)~~ 완료 |
 | 9/3 (목) | Step 1-a — ccxt 거래소 어댑터 추상화 + Binance/OKX 추가 |
 | 9/4 (금) | Step 1-b — Bybit/Coinbase 추가 + 지표 4종(Bollinger/Stochastic/ADX/CCI) + 글로벌 가중 평균 |
 | 9/5 (토) | Step 2-a — Consensus 계산 + RuleEngine 재작성 |
