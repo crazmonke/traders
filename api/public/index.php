@@ -76,8 +76,19 @@ function respond(array $body, int $status = 200): never
 // switch 앞에서 접두사로 먼저 가른다.
 const WEBHOOK_ROUTE = '/api/v1/webhooks/tradingview';
 
-if ($path === WEBHOOK_ROUTE || str_starts_with($path, WEBHOOK_ROUTE . '/')) {
-    (new App\Http\Webhooks())->handle($method, substr($path, strlen(WEBHOOK_ROUTE)));
+// 접두사 → 핸들러. 하위 경로(/{id}, /latest 등)가 있어 switch 앞에서 먼저 가른다.
+$prefixRoutes = [
+    WEBHOOK_ROUTE          => fn () => new App\Http\Webhooks(),
+    '/api/v1/signals'      => fn () => new App\Http\Signals(),
+    '/api/v1/market'       => fn () => new App\Http\Market(),
+    '/api/v1/backtest'     => fn () => new App\Http\Backtest(),
+    '/api/v1/safety'       => fn () => new App\Http\Safety(),
+];
+
+foreach ($prefixRoutes as $prefix => $factory) {
+    if ($path === $prefix || str_starts_with($path, $prefix . '/')) {
+        $factory()->handle($method, substr($path, strlen($prefix)));
+    }
 }
 
 switch ($path) {
@@ -90,7 +101,16 @@ switch ($path) {
         respond([
             'success'   => true,
             'message'   => 'AI Trading API',
-            'endpoints' => ['/api/health', WEBHOOK_ROUTE],
+            'endpoints' => [
+                '/api/health',
+                WEBHOOK_ROUTE,
+                '/api/v1/signals/latest',
+                '/api/v1/signals/strong',
+                '/api/v1/market/summary',
+                '/api/v1/backtest/run',
+                '/api/v1/backtest/logs',
+                '/api/v1/safety/state',
+            ],
         ]);
 }
 

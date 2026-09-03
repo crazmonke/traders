@@ -13,6 +13,7 @@ import logging
 import signal
 
 from trading_engine.config import settings
+from trading_engine.backtest import worker as backtest_worker
 from trading_engine.external.news import collector as news_collector
 from trading_engine.external.tradingview import receiver as webhook_receiver
 from trading_engine.indicators.calculator import Indicators
@@ -120,6 +121,13 @@ async def run() -> None:
         )
     else:
         log.info("웹훅 수신 비활성 (WEBHOOK_ENABLED=0)")
+
+    # 백테스트 워커(Step 6-a). API 요청을 큐에서 꺼내 돌린다.
+    # 재생은 CPU 작업이라 워커 안에서 스레드로 옮긴다 - 수집이 멈추지 않게.
+    if settings.backtest_worker_enabled:
+        tasks.append(backtest_worker.run_forever(store))
+    else:
+        log.info("백테스트 워커 비활성 (BACKTEST_WORKER_ENABLED=0)")
 
     # 뉴스 아카이브(Step 11-a). 신호 점수에는 영향을 주지 않는다.
     # 수집이 실패해도 예외를 밖으로 내지 않으므로 시세 수집을 멈추지 않는다.

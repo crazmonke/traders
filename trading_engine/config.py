@@ -63,6 +63,10 @@ class Settings:
     webhook_rate_per_min: int = int(os.getenv("WEBHOOK_RATE_PER_MIN", "60"))
     # 수신 시각 기준 이 시간 안의 같은 심볼 ai_signals 만 참고 연결한다(분).
     webhook_link_window_min: int = int(os.getenv("WEBHOOK_LINK_WINDOW_MIN", "15"))
+    # 백테스트 워커. PHP API 가 넣은 작업을 꺼내 돌린다 (Step 6-a).
+    backtest_worker_enabled: bool = os.getenv(
+        "BACKTEST_WORKER_ENABLED", "1"
+    ).strip() not in ("0", "false", "")
     # 뉴스 수집 주기(초). RSS 는 분 단위로도 충분하고, 너무 잦으면 매체에 실례다.
     news_poll_sec: int = int(os.getenv("NEWS_POLL_SEC", "300"))
     fred_api_key: str | None = os.getenv("FRED_API_KEY") or None

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http;
 
-use App\Auth\Jwt;
+use App\Auth\Guard;
 use App\Repository\WebhookRepository;
 use App\Utils\WebhookToken;
 
@@ -26,8 +26,10 @@ final class Webhooks
 {
     private const MAX_LABEL_LENGTH = 100;
 
-    public function __construct(private ?WebhookRepository $repository = null)
-    {
+    public function __construct(
+        private ?WebhookRepository $repository = null,
+        private ?Guard $guard = null,
+    ) {
     }
 
     private function repo(): WebhookRepository
@@ -81,25 +83,10 @@ final class Webhooks
         Response::error(Response::NOT_FOUND, '없는 경로입니다.', 404);
     }
 
-    /** 유효한 JWT 의 user_id. 아니면 401 로 끝난다. */
+    /** 유효한 JWT 의 user_id. 아니면 401 로 끝난다. (공용 가드에 위임) */
     private function authenticate(): int
     {
-        try {
-            $userId = Jwt::userIdFrom(Jwt::bearerFromHeader(Jwt::requestHeader()));
-        } catch (\RuntimeException) {
-            // JWT_SECRET 미설정. 인증을 열어주는 대신 막는다.
-            Response::error(Response::SERVER_ERROR, '인증 설정이 준비되지 않았습니다.', 500);
-        }
-
-        if ($userId === null) {
-            Response::error(Response::UNAUTHORIZED, '유효한 인증 토큰이 필요합니다.', 401);
-        }
-        // 토큰 서명은 맞지만 유저가 지워진 경우. FK 위반으로 500 이 되게 두지 않는다.
-        if (!$this->repo()->userExists($userId)) {
-            Response::error(Response::UNAUTHORIZED, '유효한 인증 토큰이 필요합니다.', 401);
-        }
-
-        return $userId;
+        return ($this->guard ??= new Guard())->userId();
     }
 
     private function create(int $userId): never

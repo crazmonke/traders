@@ -50,7 +50,7 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | [x] | **3** | 유저별 TradingView 웹훅 연동, 멀티테넌트 PRO 기능 (`external/`, PHP `webhooks` API) | 0% — 신규 모듈 | 2026-09-03 |
 | [x] | **4** | 백테스팅 엔진, 신호검증용/업비트실전용 분리, 수수료·슬리피지 반영 (`backtest/`) | 0% — 빈 패키지 | 2026-09-03 |
 | [ ] | **5** | 실거래 안전장치 + 매매 실행, Upbit 전용 (`trading/`) | 0% — 테이블만 있고 읽는 코드 없음 | |
-| [ ] | **6** | PHP REST API (signals / market / backtest / safety, JWT, Rate Limit) | ~5% — 라우터·CORS 골격 + `/api/health`만 | |
+| [~] | **6** | PHP REST API (signals / market / backtest / safety, JWT, Rate Limit) | ~5% — 라우터·CORS 골격 + `/api/health`만 | 6-a 완료 2026-09-03 |
 | [ ] | **7** | 시그널 성과 추적 스케줄러 데몬 | 0% — systemd 유닛만 있고 실행할 코드 없음 | |
 | [ ] | **8** | 테스트 · 구조화 로깅 · 알림 훅 | ~25% — Compose만 완료, 테스트 0건 | |
 | [ ] | **9** | 대시보드 UI (신호 목록·상세·차트, 거래소 합의율 표시) | 0% — `api/public/index.html`은 정적 안내 페이지 | |
@@ -458,6 +458,57 @@ Final 80 이상을 STRONG_BUY 로 내보내므로 백테스트만 85 를 요구�
 (`CANDLE_TIMEFRAME`), Step 7 의 적중률 horizon 도 5m/15m/1h 로 고정돼 있다. 백테스트에서
 1d 가 좋다는 것과 그것을 운영에 태우는 것은 다른 작업이다.
 
+## Step 6-a — REST 엔드포인트 5종 — **완료 2026-09-03**
+
+**산출물**: `Auth/Guard.php`(공용 인증 가드), `Repository/{User,Signal,Safety}Repository.php`,
+`Utils/RedisClient.php`, `Http/{Signals,Market,Backtest,Safety}.php`, 라우터 접두사 테이블,
+그리고 Python 쪽 `backtest/worker.py`.
+
+```
+GET   /api/v1/signals/latest?symbol=&limit=&before_id=
+GET   /api/v1/signals/strong
+GET   /api/v1/signals/{id}
+GET   /api/v1/market/summary
+POST  /api/v1/backtest/run      → 202 (큐 적재)
+GET   /api/v1/backtest/logs?reference_exchange=
+GET   /api/v1/safety/state
+PATCH /api/v1/safety/state
+```
+
+### 정한 것
+
+1. **`POST /backtest/run` 은 비동기다.** 실측으로 한 번에 16초~수 분이 걸린다. HTTP 요청을
+   붙잡으면 타임아웃이 나고 재시도가 같은 백테스트를 중복 실행한다. → PHP 는 Redis 리스트
+   `backtest:queue` 에 넣고 **202** 를 돌려주고, Python 워커가 꺼내 돌린다.
+   재생은 CPU 작업이라 워커 안에서 `asyncio.to_thread` 로 옮겼다 — 안 옮기면 백테스트가
+   도는 몇 분 동안 거래소 수집이 전부 지연된다.
+2. **`/backtest/logs` 는 `reference_exchange` 가 필수 인자다.** 빼먹으면 400 이다.
+   신호검증용과 업비트 실전용을 한 목록에 섞으면 화면에서 Step 4 요구사항 4 를 위반한다.
+3. **페이지네이션은 OFFSET 이 아니라 id 커서다.** 신호는 계속 쌓이므로 페이지를 넘기는
+   사이에 새 행이 들어오면 OFFSET 은 같은 행을 두 번 보여주거나 건너뛴다.
+4. **`/market/summary` 는 DB 가 아니라 엔진의 Redis 캐시를 읽는다.** TTL 이 지나 키가 없으면
+   `stale: true` 로 내려준다 — 낡은 값을 현재가처럼 보여주느니 엔진이 멈췄다는 사실이
+   화면에 드러나는 편이 낫다.
+5. **`PATCH /safety/state` 는 모르는 필드를 무시하지 않고 400 을 낸다.** 조용히 무시하면
+   "바꿨다고 생각했는데 안 바뀐" 상태가 되는데, 실거래 설정에서 그건 위험하다.
+6. **인증 로직을 `Auth/Guard` 로 통합**했다. Step 3-a 의 `Webhooks` 안에 있던 것을 꺼내
+   재사용한다 — 엔드포인트가 다섯 개 늘어난 상태에서 복사해 두면 인증 규칙이 여섯 군데로 갈라진다.
+   관리자 판정(`Guard::admin()`)도 함께 넣었다(Step 9-b 관리자 화면이 쓴다).
+
+### 실측 검증 (2026-09-03)
+
+PHP API + Python 엔진을 함께 띄워 전 경로 확인 — 인증 없이 401, 신호 목록·커서 페이지네이션,
+강한 신호 필터, `market/summary` 의 stale 판정(엔진 정지 시 true / 가동 시 4개 거래소 가격),
+`PATCH /safety/state` 의 PAPER→LIVE 전환과 잘못된 값 400.
+**백테스트는 `POST /run` → 큐 적재 → 워커 소비 → `backtest_logs` 저장 → `GET /logs` 조회**까지
+한 줄로 확인했다(BTC 1h 30일, 17초, 거래 15건). 검증 데이터는 모두 삭제했다.
+
+### 남은 것 (Step 6-b)
+
+**현재 모든 엔드포인트가 인증을 요구하지만 로그인 엔드포인트가 없다.** 토큰을 발급할 방법이
+개발용 `Jwt::issue()` 뿐이라, 지금 상태로는 실사용이 불가능하다. 6-b 에서 로그인/로그아웃과
+Rate Limit, 그리고 감사 로그 마이그레이션(004)을 붙인다.
+
 ## 순서 변경 — 화면을 실거래보다 먼저 (2026-09-03 결정)
 
 **Step 5(실거래)를 Step 6·9(API·화면) 뒤로 옮긴다.** 원래는 5 → 6 → 7 → 8 → 9 순이었다.
@@ -582,7 +633,7 @@ AI 20/Risk 15)이 필요하므로 `prompt.md` §3.3 개정이 선행되어야 �
 | 9/6 (일) | ~~Step 3-b — 멀티테넌트 웹훅 수신 엔드포인트 (Python) + 유저 격리 테스트~~ 완료 (9/3 선행) |
 | 9/7 (월) | ~~Step 4-a — 백테스팅 엔진(신호검증용)~~ 완료 (9/3 선행) |
 | 9/8 (화) | ~~Step 4-b — 백테스팅 엔진(업비트 실전용, 수수료/슬리피지)~~ 완료 (9/3 선행) |
-| 9/3 (수) 저녁 | Step 6-a — 엔드포인트 5종 + 공통 에러 포맷 |
+| 9/3 (수) | ~~Step 6-a — 엔드포인트 5종 + 공통 에러 포맷~~ 완료 |
 | 9/4 (목) | Step 6-b — **로그인/로그아웃 + 유저/관리자 역할** + Rate Limit |
 | 9/5 (금) | Step 9-a — 로그인 화면 + 신호 목록·상세 + 백테스트 결과 |
 | 9/6 (토) | Step 9-b — **관리자 화면(안전장치 제어)** + 점수 추이 차트 + 법적 고지 |
