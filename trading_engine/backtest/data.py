@@ -91,6 +91,74 @@ def dedupe(candles: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [unique[ts] for ts in sorted(unique)]
 
 
+TIMEFRAME_UNITS = {
+    "m": 60_000,
+    "h": 3_600_000,
+    "d": 86_400_000,
+    "w": 7 * 86_400_000,
+    # 월은 28~31일로 길이가 고정이 아니다. 여기 값은 **근사치**이고, 구멍 판정에서만
+    # 쓰이므로 아래 GAP_TOLERANCE 가 그 편차를 흡수한다. 정확한 달력 계산이 필요한
+    # 곳에는 쓰지 말 것.
+    "M": 30 * 86_400_000,
+}
+
+# 이 배수를 넘게 벌어지면 "구멍"으로 본다. 정확히 한 칸을 요구하면 월봉(28~31일)이
+# 매번 불연속으로 잡히고, 거래소의 미세한 타임스탬프 차이에도 걸린다.
+GAP_TOLERANCE = 1.5
+
+
+def timeframe_ms(timeframe: str) -> int:
+    """'5m' → 300000. 봉 간격을 알아야 데이터 구멍을 판정할 수 있다.
+
+    대소문자를 구분한다 — 'm' 은 분, 'M' 은 월이다(ccxt 관례).
+    """
+    value, unit = timeframe[:-1], timeframe[-1]
+    try:
+        return int(value) * TIMEFRAME_UNITS[unit]
+    except (ValueError, KeyError) as error:
+        raise ValueError(f"해석할 수 없는 타임프레임이다: {timeframe!r}") from error
+
+
+def trim_to_contiguous(
+    per_exchange: dict[str, list[dict[str, Any]]], bucket_ms: int
+) -> dict[str, list[dict[str, Any]]]:
+    """가장 긴 **연속** 구간만 남긴다. `align` 뒤에 부른다.
+
+    거래소가 구간 중간을 통째로 빼먹고 주는 일이 있다 — 실측으로 업비트 7일 요청에
+    **801봉(약 67시간)짜리 구멍**이 하나 있었다(2026-09-03). 구멍을 그대로 두면 100봉
+    지표 창이 그 구멍을 가로질러, 3일 떨어진 봉들을 연속인 것처럼 계산한다.
+    RSI·MACD·볼린저가 전부 거짓이 되고 백테스트 결과도 거짓이 된다.
+
+    비어 있는 구간을 채우지 않는다(없는 시세를 지어내는 것이다). 연속인 구간만 쓰고,
+    짧아진 사실은 호출한 쪽이 로그로 남긴다.
+    """
+    if not per_exchange:
+        return {}
+
+    stamps = sorted({int(c["ts"]) for c in next(iter(per_exchange.values()))})
+    if not stamps:
+        return per_exchange
+
+    best_start = start = 0
+    best_len = 1
+    limit = bucket_ms * GAP_TOLERANCE
+    for index in range(1, len(stamps)):
+        if stamps[index] - stamps[index - 1] > limit:
+            start = index
+        elif index - start + 1 > best_len:
+            best_len = index - start + 1
+            best_start = start
+
+    keep = set(stamps[best_start : best_start + best_len])
+    if len(keep) == len(stamps):
+        return per_exchange
+
+    return {
+        code: [c for c in candles if int(c["ts"]) in keep]
+        for code, candles in per_exchange.items()
+    }
+
+
 def align(
     per_exchange: dict[str, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:

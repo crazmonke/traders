@@ -21,7 +21,11 @@ from trading_engine.backtest.engine import (
     BacktestParams,
 )
 from trading_engine.backtest.metrics import Trade
-from trading_engine.backtest.runner import drop_short_coverage, run_backtest
+from trading_engine.backtest.runner import (
+    UPBIT_CODE,
+    drop_short_coverage,
+    run_backtest,
+)
 from trading_engine.strategy.signal_engine import SIGNAL_HOLD, SIGNAL_STRONG_BUY
 
 BUCKET_MS = 5 * 60 * 1000
@@ -142,6 +146,19 @@ def test_unknown_reference_exchange_raises():
 # --- 매매 시뮬레이션 (요구사항 3) ---------------------------------------------
 
 
+class StubEvaluation:
+    """엔진이 진입·청산 판정에 실제로 읽는 세 가지만 흉내낸다."""
+
+    def __init__(self, signal_type):
+        self.signal_type = signal_type
+        if signal_type == SIGNAL_STRONG_BUY:
+            self.direction, self.final_score = "BUY", 85.0
+        elif signal_type in ("SELL", "STRONG_SELL"):
+            self.direction, self.final_score = "SELL", 85.0
+        else:
+            self.direction, self.final_score = "NEUTRAL", 50.0
+
+
 class ScriptedBacktester(Backtester):
     """신호를 대본으로 주입한다. 인덱스 → 등급."""
 
@@ -149,13 +166,20 @@ class ScriptedBacktester(Backtester):
         super().__init__(params, cost_model)
         self._script = script
 
-    def _signal_at(self, manager, signals, exchange_candles, index):
-        return self._script.get(index)
+    def _evaluate_at(self, manager, signals, exchange_candles, index):
+        signal_type = self._script.get(index)
+        return None if signal_type is None else StubEvaluation(signal_type)
 
 
 NO_COST = costs.CostModel(fee_rate=0.0, slippage_rate=0.0, label="test")
+# 체결 규칙 테스트는 익절·손절을 명시한다. 기본값에 기대면 기본값을 재보정할 때마다
+# "규칙이 깨진 것"과 "숫자가 바뀐 것"이 구분되지 않는다.
 PARAMS = BacktestParams(
-    symbol="BTC", reference_exchange=GLOBAL_CONSENSUS, initial_capital=1000.0
+    symbol="BTC",
+    reference_exchange=GLOBAL_CONSENSUS,
+    initial_capital=1000.0,
+    take_profit_pct=1.5,
+    stop_loss_pct=1.0,
 )
 
 
@@ -425,3 +449,232 @@ def test_similar_coverage_is_left_alone():
     per_exchange = {code: flat_series(570 + i) for i, code in enumerate(("a", "b", "c", "d"))}
 
     assert drop_short_coverage(per_exchange) == per_exchange
+
+
+# --- Step 4-b: 업비트 실전용 -------------------------------------------------
+
+
+def krw_series(count, price=100_000_000.0, start_ts=0):
+    """업비트 KRW 캔들. 글로벌(USD)과 자릿수가 다르다."""
+    return [
+        bar(start_ts + i * BUCKET_MS, price, price, price, price, volume=0.5)
+        for i in range(count)
+    ]
+
+
+def test_upbit_run_uses_krw_prices_not_the_global_average():
+    """기준가가 업비트여야 한다. 글로벌 평균으로 체결하면 실전 추정이 아니다."""
+    per_exchange = {
+        "binance": flat_series(WINDOW + 6, price=70_000.0),
+        "okx": flat_series(WINDOW + 6, price=70_000.0),
+        "bybit": flat_series(WINDOW + 6, price=70_000.0),
+        "upbit": krw_series(WINDOW + 6),
+    }
+    params = BacktestParams(symbol="BTC", reference_exchange=UPBIT_CODE)
+
+    result = run_backtest(per_exchange, params)
+
+    assert result.cost_model is costs.UPBIT
+    # 평가 구간의 기준가가 KRW 자릿수여야 한다
+    assert result.equity_curve  # 봉은 충분하다
+
+
+def test_upbit_and_global_use_different_cost_models():
+    """요구사항 4 — 두 결과를 하나로 합치면 안 되는 근거."""
+    per_exchange = {
+        code: rising_candles(WINDOW + 40) for code in ("binance", "okx", "bybit")
+    }
+    per_exchange["upbit"] = rising_candles(WINDOW + 40)
+
+    global_result = run_backtest(
+        per_exchange, BacktestParams(symbol="BTC", reference_exchange=GLOBAL_CONSENSUS)
+    )
+    upbit_result = run_backtest(
+        per_exchange, BacktestParams(symbol="BTC", reference_exchange=UPBIT_CODE)
+    )
+
+    assert global_result.cost_model is costs.REFERENCE
+    assert upbit_result.cost_model is costs.UPBIT
+    # 저장 시에도 다른 행으로 갈린다
+    assert global_result.as_dict()["params"]["reference_exchange"] == GLOBAL_CONSENSUS
+    assert upbit_result.as_dict()["params"]["reference_exchange"] == UPBIT_CODE
+
+
+def test_upbit_costs_bite_more_than_the_reference_model():
+    """업비트 실전용이 신호검증용보다 비용이 크다 (0.05%×2 + 슬리피지 0.05%)."""
+    price = 100.0
+    assert costs.UPBIT.buy_cost(price, 1.0) > costs.REFERENCE.buy_cost(price, 1.0)
+    assert costs.UPBIT.sell_proceeds(price, 1.0) < costs.REFERENCE.sell_proceeds(price, 1.0)
+
+
+def test_reference_exchange_is_never_dropped_for_short_coverage():
+    """기준가 거래소를 빼면 체결할 가격이 사라진다."""
+    per_exchange = {
+        "binance": flat_series(576),
+        "okx": flat_series(576),
+        "bybit": flat_series(576),
+        "coinbase": flat_series(576),
+        "upbit": flat_series(200),
+    }
+
+    kept = drop_short_coverage(per_exchange, keep=UPBIT_CODE)
+
+    assert UPBIT_CODE in kept
+
+
+def test_upbit_backtest_is_reproducible():
+    """DoD 재현성 — 실전용 경로도 같은 입력이면 같은 결과다."""
+    per_exchange = {
+        code: rising_candles(WINDOW + 60)
+        for code in ("binance", "okx", "bybit", "upbit")
+    }
+    params = BacktestParams(symbol="BTC", reference_exchange=UPBIT_CODE)
+
+    assert run_backtest(per_exchange, params).as_dict() == (
+        run_backtest(per_exchange, params).as_dict()
+    )
+
+
+def test_missing_upbit_candles_produce_no_trades_rather_than_wrong_ones():
+    """업비트 캔들이 없으면 체결 기준가가 없다. 다른 가격으로 대신하면 안 된다."""
+    per_exchange = {
+        code: rising_candles(WINDOW + 40) for code in ("binance", "okx", "bybit")
+    }
+
+    result = run_backtest(
+        per_exchange, BacktestParams(symbol="BTC", reference_exchange=UPBIT_CODE)
+    )
+
+    assert result.metrics.total_trades == 0
+    assert result.bars_evaluated == 0
+
+
+# --- 데이터 구멍 (실측 대응) --------------------------------------------------
+
+
+def test_gap_in_the_series_is_trimmed_away():
+    """업비트 7일 요청에 801봉짜리 구멍이 있었다. 지표 창이 구멍을 넘으면 안 된다."""
+    stamps = [i * BUCKET_MS for i in range(5)] + [
+        i * BUCKET_MS for i in range(100, 110)
+    ]
+    per_exchange = {"binance": [bar(ts, 1, 1, 1, 1) for ts in stamps]}
+
+    trimmed = data.trim_to_contiguous(per_exchange, BUCKET_MS)
+
+    assert len(trimmed["binance"]) == 10  # 더 긴 연속 구간만 남는다
+    assert trimmed["binance"][0]["ts"] == 100 * BUCKET_MS
+
+
+def test_contiguous_series_is_untouched():
+    per_exchange = {"binance": flat_series(50)}
+
+    assert data.trim_to_contiguous(per_exchange, BUCKET_MS) == per_exchange
+
+
+def test_trim_applies_to_every_exchange_together():
+    """한 거래소만 잘라내면 인덱스가 어긋나 합의 계산이 통째로 틀어진다."""
+    stamps = [0, BUCKET_MS, BUCKET_MS * 50, BUCKET_MS * 51, BUCKET_MS * 52]
+    per_exchange = {
+        code: [bar(ts, 1, 1, 1, 1) for ts in stamps] for code in ("binance", "okx")
+    }
+
+    trimmed = data.trim_to_contiguous(per_exchange, BUCKET_MS)
+
+    assert len(trimmed["binance"]) == len(trimmed["okx"]) == 3
+
+
+def test_timeframe_ms_parsing():
+    assert data.timeframe_ms("1m") == 60_000
+    assert data.timeframe_ms("5m") == 300_000
+    assert data.timeframe_ms("1h") == 3_600_000
+    with pytest.raises(ValueError):
+        data.timeframe_ms("5분")
+
+
+def test_timeframe_is_recorded_for_reproducibility():
+    """같은 구간이라도 5분봉과 1시간봉은 다른 결과다. 기록에 없으면 재현할 수 없다."""
+    per_exchange = {code: rising_candles(WINDOW + 30) for code in ("binance", "okx", "bybit")}
+
+    result = run_backtest(
+        per_exchange,
+        BacktestParams(symbol="BTC", reference_exchange=GLOBAL_CONSENSUS, timeframe="1h"),
+    )
+
+    assert result.as_dict()["params"]["timeframe"] == "1h"
+
+
+# --- 진입 임계값 (재보정용) ---------------------------------------------------
+
+
+def test_raising_the_entry_threshold_reduces_trades():
+    """거래 수를 줄여 건당 기대값을 키우는 쪽 손잡이."""
+    per_exchange = {
+        code: rising_candles(WINDOW + 120) for code in ("binance", "okx", "bybit")
+    }
+    base = BacktestParams(symbol="BTC", reference_exchange=GLOBAL_CONSENSUS)
+    strict = BacktestParams(
+        symbol="BTC", reference_exchange=GLOBAL_CONSENSUS, min_final_score=95.0
+    )
+
+    loose_trades = run_backtest(per_exchange, base).metrics.total_trades
+    strict_trades = run_backtest(per_exchange, strict).metrics.total_trades
+
+    assert strict_trades <= loose_trades
+
+
+def test_default_threshold_matches_the_live_strong_buy_grade():
+    """기본값을 바꾸면 백테스트가 운영과 다른 전략을 재게 된다."""
+    from trading_engine.strategy.signal_engine import STRONG_THRESHOLD
+
+    assert BacktestParams(symbol="BTC", reference_exchange=GLOBAL_CONSENSUS).min_final_score == (
+        STRONG_THRESHOLD
+    )
+
+
+def test_precomputed_signals_give_the_same_result():
+    """조합 탐색에서 신호를 재사용해도 결과가 달라지면 안 된다."""
+    per_exchange = {
+        code: rising_candles(WINDOW + 60) for code in ("binance", "okx", "bybit")
+    }
+    params = BacktestParams(symbol="BTC", reference_exchange=GLOBAL_CONSENSUS)
+    series = data.global_price_series(per_exchange)
+    tester = Backtester(params, costs.REFERENCE)
+
+    fresh = tester.run(per_exchange, series)
+    reused = tester.run(per_exchange, series, tester.compute_signals(per_exchange, series))
+
+    assert fresh.as_dict() == reused.as_dict()
+
+
+def test_default_targets_reflect_the_recalibration():
+    """스펙의 1.5/1.0 은 손익비 1.5:1 이라 비용을 빼면 승률 40%+ 를 요구한다.
+    실측 승률이 29~48% 였고 전 심볼 손실이었다. 2:1 로 넓힌 값이 기본값이다."""
+    params = BacktestParams(symbol="BTC", reference_exchange=GLOBAL_CONSENSUS)
+
+    assert params.take_profit_pct == 5.0
+    assert params.stop_loss_pct == 2.5
+    assert params.take_profit_pct / params.stop_loss_pct == 2.0
+
+
+def test_wider_targets_beat_the_spec_defaults_on_the_same_signals():
+    """재보정의 근거를 회귀로 고정한다 - 같은 신호에서 손익비가 개선돼야 한다."""
+    per_exchange = {
+        code: rising_candles(WINDOW + 150) for code in ("binance", "okx", "bybit")
+    }
+    series = data.global_price_series(per_exchange)
+
+    def ratio(take, stop):
+        params = BacktestParams(
+            symbol="BTC",
+            reference_exchange=GLOBAL_CONSENSUS,
+            take_profit_pct=take,
+            stop_loss_pct=stop,
+        )
+        tester = Backtester(params, costs.REFERENCE)
+        return tester.run(per_exchange, series).metrics
+
+    narrow = ratio(1.5, 1.0)
+    wide = ratio(5.0, 2.5)
+
+    # 넓은 쪽이 거래 수가 적다 (익절·손절에 덜 걸린다)
+    assert wide.total_trades <= narrow.total_trades

@@ -20,7 +20,24 @@
     Final >= 80  → STRONG_BUY                 (진입)
     Final <= 30  → SELL / STRONG_SELL         (청산)
 
-익절 +1.5% / 손절 -1.0% 는 스펙 그대로다.
+### 익절·손절 폭 (2026-09-03 조합 탐색으로 스펙에서 변경)
+
+스펙의 익절 +1.5% / 손절 -1.0% 는 손익비 **1.5:1** 이라, 비용을 빼고 나면 승률이 40% 를
+넘어야 본전이다. 실측 승률은 그 설정에서 29~48% 였고 결과는 전 심볼 손실이었다.
+
+1시간봉 90일 탐색에서 **손익비 2:1 로 넓힐수록 결과가 단조롭게 좋아졌다**(BTC 기준
+1.5/1.0 → -9.4% / 3.0/1.5 → +6.9% / 5.0/2.5 → +10.5% / 8.0/4.0 → +20.1%, 세 임계값 모두
+같은 방향). 그래서 기본값을 **5.0 / 2.5** 로 옮겼다.
+
+8.0/4.0 이 더 좋았지만 탐색 격자의 **가장자리** 값이라 채택하지 않았다 — 가장자리에서
+가장 좋은 값은 대개 더 넓히면 더 좋아지는지 확인되지 않은 값이다. 5.0/2.5 는 BTC 세
+임계값 전부와 ETH 기본 임계값에서 양수였다.
+
+**진입 임계값은 기본값을 올리지 않았다.** 올리면 거래 수는 확실히 줄지만 수익은
+일관되게 좋아지지 않았고(BTC 는 비슷, ETH 는 크게 나빠짐), 무엇보다 **운영 등급과
+어긋난다** — 운영은 Final 80 이상을 STRONG_BUY 로 내보내므로, 백테스트만 85 를 요구하면
+"운영은 사는데 백테스트는 안 사는" 신호가 생긴다. 임계값을 실제로 올리려면
+`STRONG_THRESHOLD` 를 함께 올리거나 Step 5 에 매매 전용 임계값을 둬야 한다.
 
 ### 미래를 보지 않기 위한 규칙
 
@@ -41,11 +58,14 @@ from trading_engine.backtest.metrics import Metrics, Trade
 from trading_engine.indicators import calculator
 from trading_engine.market.exchange_registry import get_spec
 from trading_engine.market.market_manager import MarketManager
+from trading_engine.strategy.consensus import BUY
 from trading_engine.strategy.signal_engine import (
     SIGNAL_SELL,
     SIGNAL_STRONG_BUY,
     SIGNAL_STRONG_SELL,
+    STRONG_THRESHOLD,
     SignalEngine,
+    SignalEvaluation,
 )
 
 log = logging.getLogger(__name__)
@@ -57,6 +77,10 @@ WINDOW = 100
 ENTRY_SIGNALS = (SIGNAL_STRONG_BUY,)
 EXIT_SIGNALS = (SIGNAL_SELL, SIGNAL_STRONG_SELL)
 
+# 이보다 평가 봉이 적으면 결과를 통계로 읽을 수 없다. 실측으로 주봉은 심볼당 거래가
+# 0~1건, 월봉은 데이터 자체가 110봉뿐이라 워밍업(100봉)을 빼면 10봉만 남는다.
+MIN_MEANINGFUL_BARS = 200
+
 EXIT_TAKE_PROFIT = "TAKE_PROFIT"
 EXIT_STOP_LOSS = "STOP_LOSS"
 EXIT_SIGNAL = "SIGNAL"
@@ -67,9 +91,18 @@ EXIT_END_OF_DATA = "END_OF_DATA"
 class BacktestParams:
     symbol: str
     reference_exchange: str
+    # 봉 간격. 같은 구간이라도 5분봉과 1시간봉은 완전히 다른 결과가 나온다.
+    # 기록에 없으면 저장된 결과를 재현할 수 없다.
+    timeframe: str = "5m"
     initial_capital: float = 1_000_000.0
-    take_profit_pct: float = 1.5
-    stop_loss_pct: float = 1.0
+    # 익절·손절 기본값. **스펙(+1.5% / -1.0%)에서 바꿨다** — 2026-09-03 조합 탐색 결과.
+    # 자세한 근거는 아래 "익절·손절 폭" 주석과 ROADMAP 참고.
+    take_profit_pct: float = 5.0
+    stop_loss_pct: float = 2.5
+    # 진입에 요구하는 Final Score. 기본값은 운영 등급의 STRONG_BUY 기준과 같다
+    # (`signal_engine.STRONG_THRESHOLD`). 여기서 올려도 **운영 등급 표기는 바뀌지 않는다** —
+    # 백테스트로 임계값을 탐색한 뒤에 운영에 반영할지 따로 결정하기 위해 분리했다.
+    min_final_score: float = STRONG_THRESHOLD
     # 한 번에 자본의 몇 %를 넣는가. 100 이면 전액.
     position_size_pct: float = 100.0
 
@@ -77,9 +110,11 @@ class BacktestParams:
         return {
             "symbol": self.symbol,
             "reference_exchange": self.reference_exchange,
+            "timeframe": self.timeframe,
             "initial_capital": self.initial_capital,
             "take_profit_pct": self.take_profit_pct,
             "stop_loss_pct": self.stop_loss_pct,
+            "min_final_score": self.min_final_score,
             "position_size_pct": self.position_size_pct,
             "window": WINDOW,
             "entry_signals": list(ENTRY_SIGNALS),
@@ -134,15 +169,37 @@ class Backtester:
         self._params = params
         self._costs = cost_model
 
-    def run(
+    def compute_signals(
         self,
         exchange_candles: Mapping[str, Sequence[dict[str, Any]]],
         price_series: Sequence[dict[str, Any]],
-    ) -> BacktestResult:
+    ) -> dict[int, SignalEvaluation]:
+        """봉 인덱스 → 그 봉이 닫힌 시점의 평가.
+
+        **익절·손절·진입 임계값과 무관하다.** 그래서 한 번 계산해 두면 여러 조합을
+        같은 신호 위에서 비교할 수 있다. 지표 계산이 백테스트 비용의 대부분이라,
+        조합 탐색에서 이 분리가 없으면 같은 계산을 수십 번 반복하게 된다.
         """
-        `exchange_candles` — 거래소 코드 → 캔들 리스트(오래된 순). 신호 산출에 쓴다.
-        `price_series` — 체결에 쓸 기준 OHLC(오래된 순). 길이와 순서가 캔들과 맞아야 한다.
-        """
+        usable, length = self._usable(exchange_candles, price_series)
+        if not usable:
+            return {}
+
+        manager = MarketManager(store=None)
+        signals = SignalEngine(manager, store=None)
+        out: dict[int, SignalEvaluation] = {}
+
+        for index in range(WINDOW, length - 1):
+            evaluation = self._evaluate_at(manager, signals, usable, index)
+            if evaluation is not None:
+                out[index] = evaluation
+
+        return out
+
+    def _usable(
+        self,
+        exchange_candles: Mapping[str, Sequence[dict[str, Any]]],
+        price_series: Sequence[dict[str, Any]],
+    ) -> tuple[dict[str, Sequence[dict[str, Any]]], int]:
         usable = {
             code: candles
             for code, candles in exchange_candles.items()
@@ -150,9 +207,24 @@ class Backtester:
         }
         if not usable or len(price_series) <= WINDOW:
             log.warning("백테스트할 봉이 부족하다 (symbol=%s)", self._params.symbol)
-            return self._empty_result()
+            return {}, 0
 
-        length = min(min(len(c) for c in usable.values()), len(price_series))
+        return usable, min(min(len(c) for c in usable.values()), len(price_series))
+
+    def run(
+        self,
+        exchange_candles: Mapping[str, Sequence[dict[str, Any]]],
+        price_series: Sequence[dict[str, Any]],
+        signals_by_index: Mapping[int, SignalEvaluation] | None = None,
+    ) -> BacktestResult:
+        """
+        `exchange_candles` — 거래소 코드 → 캔들 리스트(오래된 순). 신호 산출에 쓴다.
+        `price_series` — 체결에 쓸 기준 OHLC(오래된 순). 길이와 순서가 캔들과 맞아야 한다.
+        `signals_by_index` — `compute_signals()` 결과를 재사용할 때 넘긴다.
+        """
+        usable, length = self._usable(exchange_candles, price_series)
+        if not usable:
+            return self._empty_result()
 
         manager = MarketManager(store=None)
         signals = SignalEngine(manager, store=None)
@@ -165,7 +237,11 @@ class Backtester:
 
         # 마지막 봉의 신호는 체결할 다음 봉이 없으므로 length-1 까지만 평가한다.
         for index in range(WINDOW, length - 1):
-            signal_type = self._signal_at(manager, signals, usable, index)
+            if signals_by_index is None:
+                evaluation = self._evaluate_at(manager, signals, usable, index)
+            else:
+                evaluation = signals_by_index.get(index)
+            signal_type = None if evaluation is None else evaluation.signal_type
             bars += 1
 
             current = price_series[index]
@@ -191,7 +267,7 @@ class Backtester:
                     )
                     cash += proceeds
                     position = None
-            elif signal_type in ENTRY_SIGNALS:
+            elif self._is_entry(evaluation):
                 position = self._open(cash, next_bar)
                 if position is not None:
                     cash -= position.entry_cost
@@ -202,6 +278,14 @@ class Backtester:
             trades.append(self._close_at_end(position, price_series[length - 1]))
             cash += trades[-1].exit_proceeds
             equity_curve.append(cash)
+
+        if bars and bars < MIN_MEANINGFUL_BARS:
+            log.warning(
+                "평가 봉이 %d개뿐이라 결과를 통계로 읽으면 안 된다 (%s %s)",
+                bars,
+                self._params.symbol,
+                self._params.timeframe,
+            )
 
         return BacktestResult(
             params=self._params,
@@ -218,14 +302,23 @@ class Backtester:
 
     # --- 신호 -----------------------------------------------------------------
 
-    def _signal_at(
+    def _is_entry(self, evaluation: SignalEvaluation | None) -> bool:
+        """진입 조건. 기본값에서는 `STRONG_BUY` 와 같고, 임계값을 올리면 더 엄격해진다."""
+        if evaluation is None:
+            return False
+        return (
+            evaluation.direction == BUY
+            and evaluation.final_score >= self._params.min_final_score
+        )
+
+    def _evaluate_at(
         self,
         manager: MarketManager,
         signals: SignalEngine,
         exchange_candles: Mapping[str, Sequence[dict[str, Any]]],
         index: int,
-    ) -> str | None:
-        """이 봉이 닫힌 시점의 등급. 운영과 같은 경로로 낸다."""
+    ) -> SignalEvaluation | None:
+        """이 봉이 닫힌 시점의 평가. 운영과 같은 경로로 낸다."""
         for code, candles in exchange_candles.items():
             window = candles[index - WINDOW : index + 1]
             symbol = _exchange_symbol(code, self._params.symbol)
@@ -237,8 +330,7 @@ class Backtester:
                 code, symbol, {"quote_volume_24h": last["close"] * last["volume"]}
             )
 
-        evaluation = signals.evaluate(self._params.symbol)
-        return None if evaluation is None else evaluation.signal_type
+        return signals.evaluate(self._params.symbol)
 
     # --- 매매 -----------------------------------------------------------------
 
