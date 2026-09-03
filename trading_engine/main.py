@@ -1,8 +1,8 @@
 """Trading Engine 엔트리포인트.
 
-현재 단계: Step 3-b — 수집·지표(Step 1) → 합의·룰 엔진(2-a) → AI 분석·저장·publish(2-b)
-에 유저별 트레이딩뷰 웹훅 수신(3-b)이 더해진다. 웹훅은 수집과 같은 이벤트 루프에서
-독립 태스크로 돌고, 꺼도(WEBHOOK_ENABLED=0) 수집·신호는 그대로 동작한다.
+수집·지표(Step 1) → 합의·룰 엔진(2-a) → AI 분석·저장·publish(2-b) 가 본류이고,
+웹훅 수신(3-b)·백테스트 워커(6-a)·뉴스 수집(11-a)·성과 추적(7)이 같은 이벤트 루프에서
+독립 태스크로 붙는다. **부가 태스크는 전부 꺼도 수집·신호는 그대로 동작한다.**
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from trading_engine.market.market_manager import MarketManager, base_of
 from trading_engine.market.redis_store import RedisStore
 from trading_engine.strategy.signal_engine import SignalEngine
 from trading_engine.strategy.signal_pipeline import SignalPipeline
+from trading_engine.tracking import result_tracker
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,14 @@ async def run() -> None:
         tasks.append(news_collector.run_forever())
     else:
         log.info("뉴스 수집 비활성 (NEWS_POLL_SEC=0)")
+
+    # 시그널 성과 추적(Step 7). 서버에서는 별도 systemd 유닛
+    # (`deploy/systemd/ai-trading-scheduler.service`)으로 띄우므로 기본값은 꺼짐이다.
+    # 추적기가 거래소 캔들을 받아오는 동안 수집이 멈추면 안 되기 때문에 프로세스를 나눈다.
+    # 둘 다 켜져도 Redis 분산 락이 중복 실행을 막는다.
+    if settings.tracker_in_engine:
+        tasks.append(result_tracker.run_forever(store))
+        log.info("성과 추적 동거 실행 (TRACKER_IN_ENGINE=1, %d초 주기)", settings.tracker_interval_sec)
 
     try:
         # 거래소별로 독립된 태스크다. 하나가 죽어도 나머지는 계속 수집한다.

@@ -20,12 +20,14 @@ v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
     watch:{symbol}                      -> String(TTL)   # 이 심볼을 보고 있는 유저 (Step 6·9)
     webhook:rate:{token}:{minute}       -> String(TTL)   # 토큰별 수신 제한 (Step 3-b)
     settings:ai_mode                    -> String        # 관리자가 바꾸는 AI 예산 모드 (Step 9-b)
+    lock:{name}                         -> String(TTL)   # 데몬 중복 실행 방지 (Step 7)
     channel:signals                     -> Pub/Sub       # 확정된 신호 (Step 2)
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Sequence
 
 import redis.asyncio as redis
@@ -78,6 +80,20 @@ def ai_seed_key(symbol: str) -> str:
 
 def viewer_key(symbol: str) -> str:
     return f"watch:{symbol}"
+
+
+def lock_key(name: str) -> str:
+    return f"lock:{name}"
+
+
+# 락 해제는 "내 것일 때만" 지워야 한다. GET 후 DEL 로 나누면 그 사이에 TTL 이 만료되고
+# 다른 프로세스가 잡은 락을 지워버릴 수 있다. 비교와 삭제를 한 번에 하는 이유다.
+_RELEASE_LOCK = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
 
 
 # 관리자 화면이 쓰는 런타임 설정. `.env` 는 기본값일 뿐이고, 이 키가 있으면 그것이 이긴다.
@@ -171,6 +187,24 @@ class RedisStore:
         return bool(
             await self._client.set(ai_call_key(symbol, timeframe), "1", ex=ttl, nx=True)
         )
+
+    async def claim_lock(self, name: str, ttl: int) -> str | None:
+        """분산 락을 잡는다. 잡았으면 해제용 토큰, 이미 누가 잡고 있으면 None.
+
+        TTL 을 반드시 준다 — 락을 잡은 프로세스가 죽으면 아무도 풀어줄 수 없어
+        데몬이 영원히 멈춘다. TTL 은 한 번의 작업이 걸리는 시간보다 넉넉해야 하고,
+        그보다 오래 걸리면 락이 만료된 채로 계속 도는 것이 정상 동작이다
+        (그래서 작업 자체도 중복 실행에 안전해야 한다 — `INSERT ... ON DUPLICATE KEY`).
+        """
+        token = uuid.uuid4().hex
+        if await self._client.set(lock_key(name), token, ex=ttl, nx=True):
+            return token
+        return None
+
+    async def release_lock(self, name: str, token: str) -> bool:
+        """내가 잡은 락일 때만 푼다. 남의 락을 푸는 것이 가장 흔한 분산 락 버그다."""
+        released = await self._client.eval(_RELEASE_LOCK, 1, lock_key(name), token)
+        return bool(released)
 
     async def load_ai_mode(self) -> str | None:
         """관리자가 설정한 AI 예산 모드. 없으면 None(=`.env` 기본값을 쓴다)."""

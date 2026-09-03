@@ -1,5 +1,12 @@
 # 시그널 성과 추적 스케줄러(Step 7) 상시 구동용 systemd 유닛.
-# 실행할 코드가 아직 없다 — Step 7 에서 구현한 뒤에 등록할 것.
+#
+# 최초 1회만 서버에서:
+#   sudo cp deploy/systemd/ai-trading-scheduler.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ai-trading-scheduler
+#
+# 엔진(ai-trading-engine)과 **별도 프로세스**다. 추적기가 거래소 캔들을 받아오는 동안
+# 수집이 멈추면 안 되기 때문이다. 둘 다 켜도 Redis 분산 락이 중복 실행을 막는다.
 [Unit]
 Description=AI Trading Signal Result Tracker Scheduler
 After=network-online.target docker.service
@@ -9,7 +16,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/var/www/traders
-ExecStart=/var/www/traders/trading_engine/venv/bin/python -m trading_engine.database.result_tracker_scheduler
+ExecStart=/var/www/traders/trading_engine/venv/bin/python -m trading_engine.tracking.result_tracker
 Restart=on-failure
 RestartSec=5
 

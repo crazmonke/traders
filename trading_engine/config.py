@@ -67,6 +67,18 @@ class Settings:
     backtest_worker_enabled: bool = os.getenv(
         "BACKTEST_WORKER_ENABLED", "1"
     ).strip() not in ("0", "false", "")
+    # 시그널 성과 추적 (Step 7). 가장 짧은 horizon 이 5분이므로 그보다 자주 돌 이유가 없다.
+    tracker_interval_sec: int = int(os.getenv("TRACKER_INTERVAL_SEC", "300"))
+    # 분산 락 TTL(초). 한 주기 작업(거래소 캔들 수집 포함)보다 넉넉해야 한다.
+    # 락이 만료된 채로 두 인스턴스가 겹쳐 돌아도 결과는 같다(UPSERT).
+    tracker_lock_ttl_sec: int = int(os.getenv("TRACKER_LOCK_TTL_SEC", "900"))
+    # 엔진과 같은 프로세스에서 추적기를 돌릴지. 서버는 systemd 유닛으로 따로 띄우므로
+    # 기본값은 0 이다 — 켜면 같은 일을 두 번 하게 된다(락이 막아주긴 한다).
+    tracker_in_engine: bool = os.getenv("TRACKER_IN_ENGINE", "0").strip() not in (
+        "0",
+        "false",
+        "",
+    )
     # 뉴스 수집 주기(초). RSS 는 분 단위로도 충분하고, 너무 잦으면 매체에 실례다.
     news_poll_sec: int = int(os.getenv("NEWS_POLL_SEC", "300"))
     fred_api_key: str | None = os.getenv("FRED_API_KEY") or None

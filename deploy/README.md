@@ -109,6 +109,25 @@ systemctl enable --now ai-trading-engine ai-trading-scheduler
 
 > 등록 전까지는 배포 스크립트가 "미등록 - 건너뜁니다" 경고만 남기고 정상 진행합니다.
 
+**두 유닛의 역할이 다릅니다.**
+
+| 유닛 | 하는 일 |
+| --- | --- |
+| `ai-trading-engine` | 거래소 수집 · 지표 · 신호 생성 (상시) |
+| `ai-trading-scheduler` | **시그널 성과 추적 (Step 7)** — 과거 신호가 실제로 어떻게 됐는지 `ai_signal_results` 에 기록 |
+
+추적기를 **별도 프로세스로 나눈 이유**는 거래소에서 과거 캔들을 받아오는 동안 수집이
+멈추면 안 되기 때문입니다. 두 프로세스가 겹쳐 돌아도 Redis 분산 락(`lock:signal-result-tracker`)
+이 중복 실행을 막고, 기록 자체도 `INSERT ... ON DUPLICATE KEY UPDATE` 라 안전합니다.
+
+동작 확인:
+
+```bash
+systemctl status ai-trading-scheduler
+journalctl -u ai-trading-scheduler -n 50 --no-pager   # "평가 완료 N건 기록"
+mysql -e "SELECT horizon, COUNT(*), AVG(is_accurate) FROM ai_signal_results GROUP BY horizon" ai_trading
+```
+
 ## rsync 동기화 규칙
 
 `--delete`로 서버를 저장소 상태에 맞춰 미러링하되, 아래는 제외되어 **서버 파일이 보존**됩니다.
