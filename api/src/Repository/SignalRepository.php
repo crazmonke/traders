@@ -43,10 +43,16 @@ final class SignalRepository
      * OFFSET 을 쓰지 않는다. 신호는 계속 쌓이므로 페이지를 넘기는 사이에 새 행이 들어오면
      * OFFSET 기반은 같은 행을 두 번 보여주거나 건너뛴다. id 기준 커서가 그 문제가 없다.
      */
-    public function latest(?string $symbol, int $limit, ?int $beforeId): array
-    {
+    public function latest(
+        ?string $symbol,
+        int $limit,
+        ?int $beforeId,
+        int $delayMinutes = 0,
+        ?int $historyDays = null,
+    ): array {
         $sql = 'SELECT ' . self::COLUMNS . ' FROM ai_signals WHERE 1 = 1';
         $params = [];
+        [$sql, $params] = $this->applyPlanWindow($sql, $params, $delayMinutes, $historyDays);
         if ($symbol !== null) {
             $sql .= ' AND symbol = ?';
             $params[] = $symbol;
@@ -62,12 +68,18 @@ final class SignalRepository
     }
 
     /** 강한 신호만. HOLD 와 일반 BUY/SELL 은 제외한다. */
-    public function strong(?string $symbol, int $limit, ?int $beforeId): array
-    {
+    public function strong(
+        ?string $symbol,
+        int $limit,
+        ?int $beforeId,
+        int $delayMinutes = 0,
+        ?int $historyDays = null,
+    ): array {
         $placeholders = implode(', ', array_fill(0, count(self::STRONG_TYPES), '?'));
         $sql = 'SELECT ' . self::COLUMNS
             . " FROM ai_signals WHERE signal_type IN ($placeholders)";
         $params = self::STRONG_TYPES;
+        [$sql, $params] = $this->applyPlanWindow($sql, $params, $delayMinutes, $historyDays);
         if ($symbol !== null) {
             $sql .= ' AND symbol = ?';
             $params[] = $symbol;
@@ -82,11 +94,47 @@ final class SignalRepository
         return $this->fetch($sql, $params);
     }
 
-    public function find(int $id): ?array
+    public function find(int $id, int $delayMinutes = 0, ?int $historyDays = null): ?array
     {
-        $rows = $this->fetch('SELECT ' . self::COLUMNS . ' FROM ai_signals WHERE id = ?', [$id]);
+        $sql = 'SELECT ' . self::COLUMNS . ' FROM ai_signals WHERE id = ?';
+        [$sql, $params] = $this->applyPlanWindow($sql, [$id], $delayMinutes, $historyDays);
 
-        return $rows[0] ?? null;
+        return $this->fetch($sql, $params)[0] ?? null;
+    }
+
+    /**
+     * 등급별 조회 창을 SQL 에 붙인다.
+     *
+     * - `delayMinutes` — FREE 는 갓 나온 신호를 못 본다. 실시간성이 유료 가치다.
+     * - `historyDays` — null 무제한 / 0 이력 없음(= 지연 창 안의 최신만).
+     *
+     * **화면이 아니라 여기서 걸러야 한다.** 응답에서 지우는 방식이면 SQL 은 이미 유료
+     * 데이터를 읽은 뒤이고, 실수 한 번에 그대로 새어 나간다.
+     *
+     * @param list<mixed> $params
+     * @return array{0: string, 1: list<mixed>}
+     */
+    private function applyPlanWindow(
+        string $sql,
+        array $params,
+        int $delayMinutes,
+        ?int $historyDays,
+    ): array {
+        if ($delayMinutes > 0) {
+            $sql .= ' AND created_at <= NOW() - INTERVAL ? MINUTE';
+            $params[] = $delayMinutes;
+        }
+        if ($historyDays !== null && $historyDays > 0) {
+            $sql .= ' AND created_at >= NOW() - INTERVAL ? DAY';
+            $params[] = $historyDays;
+        }
+        if ($historyDays === 0) {
+            // 이력 없음. 지연 창 언저리의 최신 신호만 보이고 과거는 막힌다.
+            $sql .= ' AND created_at >= NOW() - INTERVAL ? MINUTE';
+            $params[] = max($delayMinutes * 2, 60);
+        }
+
+        return [$sql, $params];
     }
 
     /** @return list<array<string, mixed>> */

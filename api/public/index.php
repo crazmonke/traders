@@ -78,12 +78,21 @@ const WEBHOOK_ROUTE = '/api/v1/webhooks/tradingview';
 
 // 접두사 → 핸들러. 하위 경로(/{id}, /latest 등)가 있어 switch 앞에서 먼저 가른다.
 $prefixRoutes = [
+    '/api/v1/auth'         => fn () => new App\Http\Auth(),
     WEBHOOK_ROUTE          => fn () => new App\Http\Webhooks(),
     '/api/v1/signals'      => fn () => new App\Http\Signals(),
     '/api/v1/market'       => fn () => new App\Http\Market(),
     '/api/v1/backtest'     => fn () => new App\Http\Backtest(),
     '/api/v1/safety'       => fn () => new App\Http\Safety(),
 ];
+
+// 분당 요청 제한 (Step 6 DoD). 인증 전이라 IP 기준이고, 로그인·가입은 핸들러가
+// 유저 단위로 한 번 더 조인다. 제한 자체가 인증보다 앞서야 무차별 대입을 늦출 수 있다.
+if (str_starts_with($path, '/api/v1/') && !App\Utils\RateLimiter::allow(
+    'api:' . App\Utils\RateLimiter::clientIp()
+)) {
+    App\Http\Response::error(App\Http\Response::RATE_LIMITED, '요청이 너무 잦습니다.', 429);
+}
 
 foreach ($prefixRoutes as $prefix => $factory) {
     if ($path === $prefix || str_starts_with($path, $prefix . '/')) {
@@ -103,6 +112,10 @@ switch ($path) {
             'message'   => 'AI Trading API',
             'endpoints' => [
                 '/api/health',
+                '/api/v1/auth/register',
+                '/api/v1/auth/login',
+                '/api/v1/auth/logout',
+                '/api/v1/auth/me',
                 WEBHOOK_ROUTE,
                 '/api/v1/signals/latest',
                 '/api/v1/signals/strong',

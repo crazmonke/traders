@@ -21,6 +21,9 @@ final class Response
     public const INVALID_REQUEST = 'INVALID_REQUEST';
     public const METHOD_NOT_ALLOWED = 'METHOD_NOT_ALLOWED';
     public const SERVER_ERROR = 'SERVER_ERROR';
+    public const RATE_LIMITED = 'RATE_LIMITED';
+    /** 등급이 모자람. 401(인증 안 됨)과 구분해야 화면이 "로그인하세요" 대신 "업그레이드"를 띄운다. */
+    public const PLAN_REQUIRED = 'PLAN_REQUIRED';
 
     private const ENCODE_FLAGS = JSON_UNESCAPED_UNICODE
         | JSON_UNESCAPED_SLASHES

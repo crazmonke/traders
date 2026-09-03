@@ -47,32 +47,35 @@ final class Jwt
         return $secret;
     }
 
-    /** 유저 하나에 대한 액세스 토큰. (Step 6-b 로그인 / 개발용) */
+    /**
+     * 유저 하나에 대한 액세스 토큰.
+     *
+     * `jti`(토큰 고유 id)를 넣는다. JWT 는 무상태라 발급한 토큰을 되돌릴 방법이 없는데,
+     * **실거래 권한이 걸린 관리자 토큰**을 "클라이언트에서 지웠으니 끝"으로 둘 수 없다.
+     * 로그아웃은 이 `jti` 를 Redis 폐기 목록에 올려 서버가 거부하게 한다(`Guard`).
+     */
     public static function issue(int $userId, int $ttlSec = self::DEFAULT_TTL_SEC): string
     {
         $now = time();
 
         return FirebaseJwt::encode([
             'sub' => $userId,
+            'jti' => bin2hex(random_bytes(16)),
             'iat' => $now,
             'exp' => $now + $ttlSec,
         ], self::secret(), self::ALGORITHM);
     }
 
     /**
-     * 토큰에서 user_id 를 꺼낸다. 유효하지 않으면 null.
+     * 토큰의 클레임. 유효하지 않으면 null.
      *
-     * 만료·서명 불일치·형식 오류를 구분하지 않는다. 어느 쪽이든 클라이언트가 할 일은
-     * "다시 로그인"으로 같고, 구분해서 알려주면 공격자에게 힌트가 된다.
+     * @return array{sub:int, jti:?string, exp:int}|null
      */
-    public static function userIdFrom(?string $bearerToken): ?int
+    public static function claimsFrom(?string $bearerToken): ?array
     {
         if ($bearerToken === null || $bearerToken === '') {
             return null;
         }
-
-        // 비밀키 조회를 try 밖에 둔다. 안에 두면 "JWT_SECRET 미설정"이 "토큰이 틀렸다"로
-        // 둔갑해, 설정이 잘못된 서버가 500 대신 전부 401 을 돌려주고 원인을 못 찾게 된다.
         $key = new Key(self::secret(), self::ALGORITHM);
 
         try {
@@ -85,10 +88,28 @@ final class Jwt
         if (!is_int($sub) && !(is_string($sub) && ctype_digit($sub))) {
             return null;
         }
+        if ((int) $sub <= 0) {
+            return null;
+        }
 
-        $userId = (int) $sub;
+        return [
+            'sub' => (int) $sub,
+            'jti' => isset($payload->jti) ? (string) $payload->jti : null,
+            'exp' => isset($payload->exp) ? (int) $payload->exp : 0,
+        ];
+    }
 
-        return $userId > 0 ? $userId : null;
+    /**
+     * 토큰에서 user_id 를 꺼낸다. 유효하지 않으면 null.
+     *
+     * 만료·서명 불일치·형식 오류를 구분하지 않는다. 어느 쪽이든 클라이언트가 할 일은
+     * "다시 로그인"으로 같고, 구분해서 알려주면 공격자에게 힌트가 된다.
+     */
+    public static function userIdFrom(?string $bearerToken): ?int
+    {
+        // 비밀키 조회는 `claimsFrom` 안에서도 try 밖이다. 안에 두면 "JWT_SECRET 미설정"이
+        // "토큰이 틀렸다"로 둔갑해, 설정이 잘못된 서버가 500 대신 전부 401 을 돌려준다.
+        return self::claimsFrom($bearerToken)['sub'] ?? null;
     }
 
     /** `Authorization: Bearer xxx` 헤더에서 토큰만 뽑아낸다. */

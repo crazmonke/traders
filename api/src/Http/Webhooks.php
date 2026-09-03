@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http;
 
 use App\Auth\Guard;
+use App\Auth\Plan;
 use App\Repository\WebhookRepository;
 use App\Utils\WebhookToken;
 
@@ -86,7 +87,11 @@ final class Webhooks
     /** 유효한 JWT 의 user_id. 아니면 401 로 끝난다. (공용 가드에 위임) */
     private function authenticate(): int
     {
-        return ($this->guard ??= new Guard())->userId();
+        $guard = $this->guard ??= new Guard();
+        // TradingView 웹훅은 PRO 전용 기능이다 (README §17-1, prompt.md v2 §5).
+        $guard->requirePlan(Plan::PRO);
+
+        return $guard->userId();
     }
 
     private function create(int $userId): never

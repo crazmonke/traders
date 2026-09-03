@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http;
 
 use App\Auth\Guard;
+use App\Auth\Plan;
 use App\Utils\Database;
 use App\Utils\RedisClient;
 
@@ -50,6 +51,10 @@ final class Backtest
 
     private function enqueue(int $userId): never
     {
+        // 백테스트 직접 실행은 PRO 전용이다 (README §17-1). 결과 열람은 전 등급 가능.
+        // 화면에서만 버튼을 숨기면 API 를 직접 호출해 우회할 수 있다.
+        $this->guard->requirePlan(Plan::PRO);
+
         $body = Response::jsonBody();
 
         $job = [

@@ -90,6 +90,32 @@ final class JwtTest extends TestCase
         Jwt::userIdFrom($token);
     }
 
+    public function testIssuedTokenCarriesAUniqueJti(): void
+    {
+        /** 로그아웃은 이 jti 를 폐기 목록에 올려 구현한다. 없으면 되돌릴 방법이 없다. */
+        $first = Jwt::claimsFrom(Jwt::issue(42));
+        $second = Jwt::claimsFrom(Jwt::issue(42));
+
+        self::assertNotNull($first['jti']);
+        self::assertNotSame($first['jti'], $second['jti']);
+    }
+
+    public function testClaimsCarryExpiryForRevocationTtl(): void
+    {
+        $claims = Jwt::claimsFrom(Jwt::issue(42, 600));
+
+        self::assertSame(42, $claims['sub']);
+        self::assertGreaterThan(time(), $claims['exp']);
+        self::assertLessThanOrEqual(time() + 600, $claims['exp']);
+    }
+
+    public function testClaimsFromRejectsInvalidTokens(): void
+    {
+        self::assertNull(Jwt::claimsFrom(null));
+        self::assertNull(Jwt::claimsFrom('garbage'));
+        self::assertNull(Jwt::claimsFrom(Jwt::issue(42, -10)));
+    }
+
     public function testBearerHeaderParsing(): void
     {
         self::assertSame('abc.def.ghi', Jwt::bearerFromHeader('Bearer abc.def.ghi'));
