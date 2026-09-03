@@ -19,6 +19,8 @@ final class AuditRepository
     public const LOGOUT = 'LOGOUT';
     public const REGISTER = 'REGISTER';
     public const SAFETY_CHANGE = 'SAFETY_CHANGE';
+    /** 관리자 승격·강등. 실거래 권한과 직결되므로 반드시 남긴다. */
+    public const ROLE_CHANGE = 'ROLE_CHANGE';
 
     public function __construct(private ?\PDO $pdo = null)
     {
