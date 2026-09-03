@@ -56,6 +56,7 @@ NEUTRAL_SNAPSHOT = {
     "close": 100.0,
     "rsi": 50.0,
     "macd_golden_cross": False,
+    "macd_dead_cross": False,
     "ma_trend": TREND_MIXED,
     "bb_lower": 90.0,
     "bb_mid": 100.0,
@@ -68,6 +69,8 @@ NEUTRAL_SNAPSHOT = {
     "volume_change_rate": 0.0,
     "orderbook_imbalance": 0.0,
     "atr": 1.0,
+    "vwap": 100.0,
+    "vwap_divergence": 0.0,
     "prev_close": 100.0,
     "prev_macd": 0.0,
     "prev_macd_signal": 0.0,
@@ -87,31 +90,46 @@ def points_for(result, key):
     return next(item.points for item in result.items if item.key == key)
 
 
+def detail_for(result, key):
+    return next(item.detail for item in result.items if item.key == key)
+
+
 # --- RuleEngine: 배점표 (§3.3) ----------------------------------------------
 
 
-def test_rsi_maps_linearly_between_30_and_70():
-    assert rsi_points(30.0)[0] == pytest.approx(20.0)  # 과매도 → 만점
-    assert rsi_points(20.0)[0] == pytest.approx(20.0)
-    assert rsi_points(70.0)[0] == pytest.approx(0.0)  # 과매수 → 0점
-    assert rsi_points(80.0)[0] == pytest.approx(0.0)
-    assert rsi_points(50.0)[0] == pytest.approx(10.0)  # 중간 → 절반
+def test_rsi_is_symmetric_around_50():
+    """v3 은 RSI 를 ±10 으로 잰다. 50 이 정확히 0 이어야 중립이 흔들리지 않는다."""
+    assert rsi_points(30.0)[0] == pytest.approx(10.0)  # 과매도 → +만점
+    assert rsi_points(20.0)[0] == pytest.approx(10.0)  # 밖은 잘린다
+    assert rsi_points(70.0)[0] == pytest.approx(-10.0)  # 과매수 → -만점
+    assert rsi_points(80.0)[0] == pytest.approx(-10.0)
+    assert rsi_points(50.0)[0] == pytest.approx(0.0)  # 중립
+    assert rsi_points(40.0)[0] == pytest.approx(5.0)  # 선형
 
 
-def test_rsi_missing_scores_neutral_not_zero():
-    """워밍업 중이라는 이유로 하락 쪽에 서면 안 된다."""
-    assert rsi_points(None)[0] == pytest.approx(10.0)
+def test_rsi_missing_is_neutral_not_bullish():
+    """워밍업 중이라는 이유로 어느 쪽으로도 기울면 안 된다."""
+    assert rsi_points(None)[0] == pytest.approx(0.0)
 
 
 def test_neutral_snapshot_lands_exactly_at_50():
-    """§3.2 의 60/40 임계값은 중립이 50 이라는 전제 위에 있다. 기준점 40 이 그걸 맞춘다."""
+    """§3.2 의 60/40 임계값은 중립이 50 이라는 전제 위에 있다.
+
+    v2 는 가점 +110 / 감점 -30 의 비대칭을 기준점 40 으로 **보정**해서 맞췄다.
+    v3 은 모든 항목이 0 을 중심으로 대칭이라 기준점 50 이 곧 중립이다.
+    """
     result = engine.score(NEUTRAL_SNAPSHOT)
     assert result.score == pytest.approx(50.0)
     assert consensus.classify_direction(result.score) == NEUTRAL
 
 
+def test_empty_snapshot_is_also_neutral():
+    """지표가 하나도 없을 때 50 이 아니면, 워밍업 구간이 통째로 한쪽 신호가 된다."""
+    assert engine.score({}).score == pytest.approx(50.0)
+
+
 def test_quiet_market_does_not_produce_a_sell_signal():
-    """기준점이 없으면 아무 일도 없는 장이 합의 100% STRONG_SELL 로 나갔다."""
+    """아무 일도 없는 장이 합의 100% STRONG_SELL 로 나가면 AI 호출 비용까지 샌다."""
     tech = engine.score(NEUTRAL_SNAPSHOT).score
     result = consensus.compute("BTC", dict.fromkeys(USD_EXCHANGE_CODES + ("upbit",), tech))
     score = final_score(tech, result.pct, 100.0, result.direction)
@@ -120,63 +138,48 @@ def test_quiet_market_does_not_produce_a_sell_signal():
     assert should_request_ai(tech, result.pct) is False
 
 
-def test_macd_golden_cross_adds_15():
-    result = engine.score(snapshot(macd_golden_cross=True))
-    assert points_for(result, "macd_golden_cross") == pytest.approx(15.0)
+# --- 대칭성: 하락 근거도 점수로 표현되어야 한다 (v3 재설계의 핵심) ---------------
 
 
-def test_bullish_ma_alignment_adds_15():
-    result = engine.score(snapshot(ma_trend=TREND_BULLISH))
-    assert points_for(result, "ma_trend") == pytest.approx(15.0)
+def test_macd_cross_is_symmetric():
+    """v2 는 데드크로스를 계산조차 하지 않아 하락에 줄 감점이 없었다."""
+    assert points_for(engine.score(snapshot(macd_golden_cross=True)), "macd_cross") == 10.0
+    assert points_for(engine.score(snapshot(macd_dead_cross=True)), "macd_cross") == -10.0
+    assert points_for(engine.score(snapshot()), "macd_cross") == 0.0
 
 
-def test_bollinger_reentry_adds_10():
-    """직전 봉은 하단 밖, 이번 봉은 밴드 안."""
-    result = engine.score(
-        snapshot(prev_close=85.0, prev_bb_lower=88.0, close=95.0, bb_lower=90.0)
-    )
-    assert points_for(result, "bollinger") == pytest.approx(10.0)
+def test_ma_alignment_is_symmetric():
+    """v2 는 정배열 +15 / 역배열 0 이었다."""
+    assert points_for(engine.score(snapshot(ma_trend=TREND_BULLISH)), "ma_trend") == 15.0
+    assert points_for(engine.score(snapshot(ma_trend=TREND_BEARISH)), "ma_trend") == -15.0
+    assert points_for(engine.score(snapshot(ma_trend=TREND_MIXED)), "ma_trend") == 0.0
 
 
-def test_bollinger_sustained_breakout_subtracts_10():
-    result = engine.score(
-        snapshot(
-            prev_close=115.0,
-            prev_bb_upper=110.0,
-            close=120.0,
-            bb_upper=112.0,
-            bollinger_position=BB_ABOVE_UPPER,
-        )
-    )
-    assert points_for(result, "bollinger") == pytest.approx(-10.0)
+def test_bearish_setup_mirrors_the_bullish_one():
+    """같은 세기의 상승·하락 근거는 50 을 사이에 두고 같은 거리에 있어야 한다."""
+    bull = engine.score(
+        snapshot(rsi=30.0, ma_trend=TREND_BULLISH, macd_golden_cross=True,
+                 adx=30.0, volume_change_rate=0.5)
+    ).score
+    bear = engine.score(
+        snapshot(rsi=70.0, ma_trend=TREND_BEARISH, macd_dead_cross=True,
+                 adx=30.0, volume_change_rate=0.5)
+    ).score
+
+    assert bull - 50.0 == pytest.approx(50.0 - bear)
 
 
-def test_bollinger_first_breakout_is_not_penalized_yet():
-    """한 봉만 보고는 '지속'인지 알 수 없다. 다음 봉까지 기다린다."""
-    result = engine.score(
-        snapshot(prev_close=105.0, close=120.0, bb_upper=112.0, bollinger_position=BB_ABOVE_UPPER)
-    )
-    assert points_for(result, "bollinger") == pytest.approx(0.0)
-
-
-def test_stochastic_bullish_cross_from_oversold_adds_10():
-    result = engine.score(
-        snapshot(prev_stochastic_k=15.0, prev_stochastic_d=18.0, stochastic_k=25.0, stochastic_d=20.0)
-    )
-    assert points_for(result, "stochastic") == pytest.approx(10.0)
-
-
-def test_stochastic_cross_above_oversold_zone_scores_nothing():
-    """§3.3 은 '20 이하에서' 돌파한 경우만 가점한다."""
-    result = engine.score(
-        snapshot(prev_stochastic_k=45.0, prev_stochastic_d=48.0, stochastic_k=55.0, stochastic_d=50.0)
-    )
-    assert points_for(result, "stochastic") == pytest.approx(0.0)
-
-
-def test_stochastic_overbought_subtracts_10():
-    result = engine.score(snapshot(stochastic_k=85.0, stochastic_d=80.0))
-    assert points_for(result, "stochastic") == pytest.approx(-10.0)
+def test_volume_surge_follows_the_trend_direction():
+    """거래량은 방향을 모른다. v2 는 하락 중 급증까지 상승 근거로 셌다."""
+    assert points_for(engine.score(snapshot(volume_change_rate=0.5, ma_trend=TREND_BULLISH)),
+                      "volume") == 5.0
+    assert points_for(engine.score(snapshot(volume_change_rate=0.5, ma_trend=TREND_BEARISH)),
+                      "volume") == -5.0
+    # 방향이 없으면 실을 곳이 없다.
+    assert points_for(engine.score(snapshot(volume_change_rate=0.5, ma_trend=TREND_MIXED)),
+                      "volume") == 0.0
+    assert points_for(engine.score(snapshot(volume_change_rate=0.29, ma_trend=TREND_BULLISH)),
+                      "volume") == 0.0
 
 
 def test_adx_follows_trend_direction():
@@ -187,64 +190,104 @@ def test_adx_follows_trend_direction():
     assert points_for(engine.score(snapshot(adx=20.0, ma_trend=TREND_BULLISH)), "adx") == 0.0
 
 
-def test_cci_rebound_from_oversold_adds_10():
-    assert points_for(engine.score(snapshot(prev_cci=-150.0, cci=-120.0)), "cci") == 10.0
-    # 계속 내려가는 중이면 반등이 아니다.
-    assert points_for(engine.score(snapshot(prev_cci=-150.0, cci=-180.0)), "cci") == 0.0
+def test_bollinger_reentry_and_breakout_are_symmetric():
+    reentry = engine.score(
+        snapshot(prev_close=85.0, prev_bb_lower=88.0, close=95.0, bb_lower=90.0)
+    )
+    breakout = engine.score(
+        snapshot(prev_close=115.0, prev_bb_upper=110.0, close=120.0, bb_upper=112.0,
+                 bollinger_position=BB_ABOVE_UPPER)
+    )
+
+    assert points_for(reentry, "bollinger") == pytest.approx(5.0)
+    assert points_for(breakout, "bollinger") == pytest.approx(-5.0)
 
 
-def test_volume_surge_needs_30_percent():
-    assert points_for(engine.score(snapshot(volume_change_rate=0.30)), "volume") == 10.0
-    assert points_for(engine.score(snapshot(volume_change_rate=0.29)), "volume") == 0.0
+def test_bollinger_first_breakout_is_not_penalized_yet():
+    """한 봉만 보고는 '지속'인지 알 수 없다. 다음 봉까지 기다린다."""
+    result = engine.score(
+        snapshot(prev_close=105.0, close=120.0, bb_upper=112.0, bollinger_position=BB_ABOVE_UPPER)
+    )
+    assert points_for(result, "bollinger") == pytest.approx(0.0)
 
 
-def test_orderbook_imbalance_needs_more_than_15_percent():
-    assert points_for(engine.score(snapshot(orderbook_imbalance=0.20)), "orderbook") == 10.0
-    assert points_for(engine.score(snapshot(orderbook_imbalance=0.15)), "orderbook") == 0.0
+# --- 중복 제거: 같은 것을 세 번 세지 않는다 -------------------------------------
+
+
+def test_redundant_oscillators_no_longer_score():
+    """RSI·스토캐스틱·CCI 는 실측 상관 r = 0.76~0.84 다. 합쳐서 40점이었다.
+
+    v3 은 모멘텀 축을 RSI 하나로 합쳤다. 스토캐스틱과 CCI 는 화면에는 남지만
+    점수는 움직이지 않는다.
+    """
+    overbought = engine.score(snapshot(stochastic_k=85.0, stochastic_d=80.0))
+    oversold_cross = engine.score(
+        snapshot(prev_stochastic_k=15.0, prev_stochastic_d=18.0,
+                 stochastic_k=25.0, stochastic_d=20.0)
+    )
+    cci_rebound_snapshot = engine.score(snapshot(prev_cci=-150.0, cci=-120.0))
+
+    assert points_for(overbought, "stochastic") == 0.0
+    assert points_for(oversold_cross, "stochastic") == 0.0
+    assert points_for(cci_rebound_snapshot, "cci") == 0.0
+    # 값 자체는 사라지지 않는다 — 다시 넣을지 판단할 근거가 계속 쌓여야 한다.
+    assert "85.0" in detail_for(overbought, "stochastic")
+    assert "-120" in detail_for(cci_rebound_snapshot, "cci")
+
+
+def test_orderbook_is_reference_only_because_it_is_untestable():
+    """백테스트 표본 9,443건 중 호가가 실린 것은 0건이었다.
+
+    검증할 수 없는 항목이 운영에서만 조용히 10점을 움직이고 있었다.
+    """
+    result = engine.score(snapshot(orderbook_imbalance=0.30))
+
+    assert points_for(result, "orderbook") == 0.0
+    assert "매수 우위" in detail_for(result, "orderbook")
+
+
+# --- 상·하한 -------------------------------------------------------------------
 
 
 def test_score_is_clamped_to_100():
-    """배점 합계 상한은 110점이다. §3.3 의 min(sum, 100) 이 걸려야 한다."""
+    """가점 합계 상한은 55점이라 기준점 50 위에서 clamp 가 걸린다."""
     result = engine.score(
         snapshot(
             rsi=25.0,
             macd_golden_cross=True,
+            macd_dead_cross=False,
             ma_trend=TREND_BULLISH,
             prev_close=85.0,
             prev_bb_lower=88.0,
             close=95.0,
             bb_lower=90.0,
-            prev_stochastic_k=15.0,
-            prev_stochastic_d=18.0,
-            stochastic_k=25.0,
-            stochastic_d=20.0,
             adx=30.0,
-            prev_cci=-150.0,
-            cci=-120.0,
             volume_change_rate=0.5,
             orderbook_imbalance=0.3,
         )
     )
-    assert result.raw_sum == pytest.approx(BASE_SCORE + 110.0)
+    assert result.raw_sum == pytest.approx(BASE_SCORE + 55.0)
     assert result.score == pytest.approx(100.0)
 
 
-def test_score_floor_is_the_worst_the_table_can_express():
-    """감점 3종(-30)과 RSI 0점이 최악이다. 기준점 위이므로 clamp 하한에는 닿지 않는다."""
+def test_score_floor_mirrors_the_ceiling():
+    """v2 는 하한이 10 이었다 — 표가 표현할 수 있는 최악이 중립에서 30점 아래였다."""
     result = engine.score(
         snapshot(
-            rsi=80.0,
+            rsi=75.0,
+            macd_dead_cross=True,
             ma_trend=TREND_BEARISH,
             prev_close=115.0,
             prev_bb_upper=110.0,
             close=120.0,
             bb_upper=112.0,
-            stochastic_k=85.0,
+            bollinger_position=BB_ABOVE_UPPER,
             adx=30.0,
+            volume_change_rate=0.5,
         )
     )
-    assert result.raw_sum == pytest.approx(BASE_SCORE - 30.0)
-    assert result.score == pytest.approx(10.0)
+    assert result.raw_sum == pytest.approx(BASE_SCORE - 55.0)
+    assert result.score == pytest.approx(0.0)
     assert consensus.classify_direction(result.score) == SELL
 
 
@@ -255,14 +298,16 @@ def test_score_items_explain_every_line():
     assert keys == [
         "base",
         "rsi",
-        "macd_golden_cross",
         "ma_trend",
-        "bollinger",
-        "stochastic",
+        "macd_cross",
         "adx",
-        "cci",
+        "bollinger",
         "volume",
+        # 아래 넷은 점수 0 — 빼면서 지워버리면 "왜 뺐는지"도 같이 사라진다.
+        "stochastic",
+        "cci",
         "orderbook",
+        "vwap",
     ]
     assert all(item.detail for item in result.items)
     # 내역의 합이 곧 점수여야 UI 가 "왜 이 점수인지"를 설명할 수 있다.
@@ -364,26 +409,23 @@ def test_risk_never_goes_below_zero():
 # --- Final Score (§3.3) -----------------------------------------------------
 
 
-def test_final_weights_match_spec():
-    assert FINAL_WEIGHTS == {"tech": 0.45, "consensus": 0.20, "ai": 0.20, "risk": 0.15}
+def test_ai_is_not_part_of_the_score():
+    """LLM 은 가격을 예측하지 못한다. 검증할 수 없는 값을 점수에 넣으면
+    점수 전체가 검증 불가능해진다 (2026-09-03 결정)."""
+    assert "ai" not in FINAL_WEIGHTS
+    assert FINAL_WEIGHTS == {"tech": 0.45, "consensus": 0.20, "risk": 0.15}
 
 
-def test_final_score_uses_spec_weights_when_ai_is_present():
-    assert final_score(80.0, 60.0, 90.0, BUY, ai=70.0) == pytest.approx(
-        80 * 0.45 + 60 * 0.20 + 70 * 0.20 + 90 * 0.15
-    )
-
-
-def test_final_score_redistributes_weight_when_ai_is_absent():
-    """부르지도 않은 AI 가 점수를 밀거나 끌면 안 된다."""
+def test_final_score_redistributes_the_spec_weights():
+    """§3.3 구성비에서 AI 몫을 빼고 남은 셋을 비례 재분배한다."""
     expected = (80 * 0.45 + 60 * 0.20 + 90 * 0.15) / 0.80
     assert final_score(80.0, 60.0, 90.0, BUY) == pytest.approx(expected)
 
 
 def test_final_score_is_symmetric_between_buy_and_sell():
     """확신에 찬 매도가 어정쩡한 중간 점수를 받으면 안 된다."""
-    strong_buy = final_score(90.0, 100.0, 100.0, BUY, ai=90.0)
-    strong_sell = final_score(10.0, 100.0, 100.0, SELL, ai=10.0)
+    strong_buy = final_score(90.0, 100.0, 100.0, BUY)
+    strong_sell = final_score(10.0, 100.0, 100.0, SELL)
     assert strong_buy == pytest.approx(strong_sell)
     assert strong_buy > 90.0
 
@@ -414,6 +456,7 @@ def make_indicators(market="BTC/USDT", **overrides):
         "macd_signal": 0.0,
         "macd_hist": 0.0,
         "macd_golden_cross": False,
+        "macd_dead_cross": False,
         "ma5": 100.0,
         "ma20": 100.0,
         "ma60": 100.0,
@@ -429,6 +472,8 @@ def make_indicators(market="BTC/USDT", **overrides):
         "orderbook_imbalance": 0.0,
         "volume_change_rate": 0.0,
         "atr": 0.5,
+        "vwap": 100.0,
+        "vwap_divergence": 0.0,
         "prev_close": 100.0,
         "prev_macd": 0.0,
         "prev_macd_signal": 0.0,
@@ -486,8 +531,8 @@ def test_engine_agrees_across_exchanges_and_buys():
     assert evaluation.consensus.valid_count == 5  # 업비트도 합의에는 들어간다
     assert evaluation.consensus.pct == pytest.approx(100.0)
     assert evaluation.direction == BUY
-    # 40(기준) + 12.5(RSI 45) + 15(골든크로스) + 15(정배열) + 10(ADX)
-    assert evaluation.tech.score == pytest.approx(92.5)
+    # 50(기준) + 2.5(RSI 45) + 15(정배열) + 10(골든크로스) + 10(ADX)
+    assert evaluation.tech.score == pytest.approx(87.5)
     assert evaluation.signal_type == SIGNAL_STRONG_BUY
     assert evaluation.needs_ai is True
 
@@ -559,17 +604,18 @@ async def test_publish_is_throttled_per_symbol():
     assert await signal_engine.publish("BTC", force=True) is not None
 
 
-def test_with_ai_keeps_the_original_evaluation_intact():
+def test_with_ai_records_the_score_without_changing_the_signal():
+    """AI 는 설명 담당이다. 점수와 등급은 룰이 정한 것 그대로 남는다."""
     records = [(code, sym, make_indicators(sym, **BULLISH)) for code, sym in USD_EXCHANGES]
     _, signal_engine = build_engine(records)
     before = signal_engine.evaluate("BTC")
 
-    after = before.with_ai(20.0)
+    after = before.with_ai(20.0)  # AI 가 정반대로 봐도
 
     assert before.ai_score is None
     assert after.ai_score == 20.0
-    assert after.final_score < before.final_score  # AI 가 반대편을 보면 내려간다
-    assert after.tech.score == before.tech.score
+    assert after.final_score == before.final_score
+    assert after.signal_type == before.signal_type
 
 
 # --- 글로벌 집계가 배점 입력을 갖추는지 -------------------------------------

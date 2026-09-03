@@ -25,6 +25,7 @@ STOCH_D = 3
 ADX_LENGTH = 14
 CCI_LENGTH = 20
 ATR_LENGTH = 14
+DAY_MS = 24 * 60 * 60 * 1000
 
 # 각 지표가 값을 내려면 필요한 최소 봉 수
 MIN_RSI_CANDLES = RSI_LENGTH + 1
@@ -57,6 +58,7 @@ class Indicators:
     macd_signal: float | None
     macd_hist: float | None
     macd_golden_cross: bool
+    macd_dead_cross: bool
     ma5: float | None
     ma20: float | None
     ma60: float | None
@@ -72,6 +74,9 @@ class Indicators:
     orderbook_imbalance: float | None
     volume_change_rate: float | None
     atr: float | None
+    # 거래량 가중 평균가와 괴리율. 참고 지표이며 배점에는 들어가지 않는다(2026-09-03).
+    vwap: float | None
+    vwap_divergence: float | None
     # 직전 봉 값. Step 2 배점표에는 "하단 이탈 후 복귀", "%K 가 %D 를 상향 돌파",
     # "CCI 가 -100 이하에서 반등" 처럼 한 봉 전과 비교해야 판정되는 항목이 있다.
     # 판정 자체(=배점)는 RuleEngine 이 하고, 여기서는 재료만 숫자로 내놓는다.
@@ -159,6 +164,50 @@ def compute_atr(
     return true_range.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
 
 
+def compute_session_vwap(candles: Sequence[dict[str, Any]]) -> float | None:
+    """세션 VWAP — UTC 자정 이후 봉만으로 낸 거래량 가중 평균가.
+
+    **트레이딩뷰가 보여주는 VWAP 과 같은 정의**(세션 앵커드)다. 롤링 VWAP 을 먼저
+    구현했다가 바꿨다 — 롤링은 사실상 이동평균이라 RSI 와 r=0.895 로 거의 중복이었고,
+    세션 앵커드는 r=0.799 로 그나마 낫다(BTC 1h 620표본 실측, 2026-09-03).
+
+    **한계:** 우리는 100봉 창으로 지표를 돌리므로 창을 벗어난 세션 앵커는 볼 수 없다.
+    5분봉에서 UTC 하루는 288봉이라, 창에 담긴 부분만으로 계산된다. 트레이딩뷰 값과
+    정확히 일치하지 않을 수 있고, 그래서 **배점에 넣지 않고 참고 지표로만 쓴다.**
+
+    거래량이 0이면(휴장·결측) 정의되지 않으므로 None.
+    """
+    if not candles:
+        return None
+
+    last_day = int(candles[-1]["ts"]) // DAY_MS
+    session = [c for c in candles if int(c["ts"]) // DAY_MS == last_day]
+    volume = sum(float(c["volume"]) for c in session)
+    if not session or volume <= 0:
+        return None
+
+    weighted = sum(
+        (float(c["high"]) + float(c["low"]) + float(c["close"])) / 3.0 * float(c["volume"])
+        for c in session
+    )
+
+    return weighted / volume
+
+
+def vwap_divergence_pct(close: float | None, vwap: float | None) -> float | None:
+    """현재가가 VWAP 에서 몇 % 떨어져 있는지. 양수면 VWAP 위(과열 쪽).
+
+    "VWAP Divergence" 라는 이름의 상용 인디케이터가 여럿 있으나 각자 계산이 다르고
+    비공개인 것도 많다. 여기 있는 것은 **공개된 표준 정의**(가격과 VWAP 의 괴리율)이며
+    특정 상용 스크립트를 옮긴 것이 아니다 — 비공개 스크립트는 재현할 수도 없고
+    해서도 안 된다.
+    """
+    if close is None or vwap is None or vwap <= 0:
+        return None
+
+    return (close - vwap) / vwap * 100.0
+
+
 def classify_bollinger_position(
     close: float | None, lower: float | None, mid: float | None, upper: float | None
 ) -> str | None:
@@ -225,6 +274,23 @@ def detect_golden_cross(macd: pd.Series, signal: pd.Series) -> bool:
     return is_golden_cross(_prev(macd), _prev(signal), _last(macd), _last(signal))
 
 
+def is_dead_cross(
+    prev_macd: float | None,
+    prev_signal: float | None,
+    macd: float | None,
+    signal: float | None,
+) -> bool:
+    """골든크로스의 거울상 — 시그널 위였던 MACD 가 이번 봉에 아래로 내려섰는지.
+
+    **이 판정이 없어서 배점표가 상승 쪽으로 기울어 있었다.** 골든크로스에는 가점을
+    주면서 데드크로스에는 줄 감점이 없으니, 하락 근거를 점수로 표현할 방법이
+    RSI 과매수(0점)뿐이었다 (`rule_engine` 의 "대칭" 절 참고).
+    """
+    if None in (prev_macd, prev_signal, macd, signal):
+        return False
+    return bool(prev_macd >= prev_signal and macd < signal)
+
+
 def compute_volume_change_rate(volumes: pd.Series) -> float | None:
     """직전 봉 대비 거래량 증감률. 3.2절 "거래량 급증(+30%)" 판정 입력."""
     if volumes is None or len(volumes) < 2:
@@ -246,12 +312,13 @@ def compute(
     count = len(df)
 
     rsi = macd_value = macd_signal_value = macd_hist = None
-    golden_cross = False
+    golden_cross = dead_cross = False
     mas: dict[int, float | None] = {period: None for period in MA_PERIODS}
     close_price = volume_change = None
     candle_ts = None
     bb_lower = bb_mid = bb_upper = None
     stoch_k = stoch_d = adx_value = cci_value = atr_value = None
+    vwap_value = vwap_div = None
     prev_close = prev_macd = prev_macd_signal = None
     prev_bb_lower = prev_bb_upper = None
     prev_stoch_k = prev_stoch_d = prev_cci = None
@@ -278,6 +345,9 @@ def compute(
                 prev_macd = _prev(macd_line)
                 prev_macd_signal = _prev(signal_line)
                 golden_cross = is_golden_cross(
+                    prev_macd, prev_macd_signal, macd_value, macd_signal_value
+                )
+                dead_cross = is_dead_cross(
                     prev_macd, prev_macd_signal, macd_value, macd_signal_value
                 )
 
@@ -319,6 +389,9 @@ def compute(
         if count >= MIN_ATR_CANDLES:
             atr_value = _last(compute_atr(high, low, close, ATR_LENGTH))
 
+        vwap_value = compute_session_vwap(candles)
+        vwap_div = vwap_divergence_pct(close_price, vwap_value)
+
     orderbook = orderbook or {}
     imbalance = compute_orderbook_imbalance(
         orderbook.get("total_bid_size"), orderbook.get("total_ask_size")
@@ -332,6 +405,7 @@ def compute(
         macd_signal=macd_signal_value,
         macd_hist=macd_hist,
         macd_golden_cross=golden_cross,
+        macd_dead_cross=dead_cross,
         ma5=mas[5],
         ma20=mas[20],
         ma60=mas[60],
@@ -349,6 +423,8 @@ def compute(
         orderbook_imbalance=imbalance,
         volume_change_rate=volume_change,
         atr=atr_value,
+        vwap=vwap_value,
+        vwap_divergence=vwap_div,
         prev_close=prev_close,
         prev_macd=prev_macd,
         prev_macd_signal=prev_macd_signal,

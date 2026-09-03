@@ -72,12 +72,19 @@ function logout(callServer = true) {
 
 /* --- 표시 헬퍼 ------------------------------------------------------------ */
 
+/*
+ * 등급 표기. **"매수/매도"를 쓰지 않는다** (docs/LEGAL.md).
+ *
+ * 유료 + 특정 코인 + 매수/매도 가 합쳐지면 투자 추천 서비스로 평가될 소지가 커진다.
+ * 우리가 하는 일은 "사라/팔아라"가 아니라 "시장 데이터를 분석하면 이런 상태다"이므로
+ * 표기도 그렇게 맞춘다. DB 의 `signal_type` ENUM 은 내부 값이라 그대로 둔다.
+ */
 const SIGNAL_LABEL = {
-    STRONG_BUY: { cls: 'buy', mark: '▲▲', text: '적극 매수' },
-    BUY: { cls: 'buy', mark: '▲', text: '매수' },
-    HOLD: { cls: 'hold', mark: '―', text: '관망' },
-    SELL: { cls: 'sell', mark: '▼', text: '매도' },
-    STRONG_SELL: { cls: 'sell', mark: '▼▼', text: '적극 매도' },
+    STRONG_BUY: { cls: 'buy', mark: '▲▲', text: '상승 신호 강함' },
+    BUY: { cls: 'buy', mark: '▲', text: '상승 신호' },
+    HOLD: { cls: 'hold', mark: '―', text: '중립' },
+    SELL: { cls: 'sell', mark: '▼', text: '하락 신호' },
+    STRONG_SELL: { cls: 'sell', mark: '▼▼', text: '하락 신호 강함' },
 };
 
 /** 신호 배지. **색과 함께 기호를 반드시 넣는다** — 색각 이상에서도 읽혀야 한다. */
@@ -141,6 +148,15 @@ const LEGAL = `본 서비스에서 제공하는 분석 결과 및 AI 신호는 �
 수익을 보장하지 않습니다. 모든 투자의 최종 책임은 본인에게 있습니다.
 표시되는 시세는 여러 거래소의 데이터를 자체 집계한 것이며,
 트레이딩뷰(TradingView)의 공식 데이터가 아닙니다.`;
+
+/** 확률 옆에 반드시 붙인다. 숫자만 보이면 "보장"으로 읽힌다 (docs/LEGAL.md). */
+const MODEL_OUTPUT_NOTE =
+    '과거 데이터 기반 모델 출력값이며 실제 미래 수익률을 보장하지 않습니다.';
+
+/** 백테스트 화면 고지. 실현되지 않은 수익률 제시는 자본시장법상 광고 금지 대상이다. */
+const BACKTEST_NOTE =
+    '과거 데이터로 전략을 재생한 시뮬레이션 결과입니다. 실제 거래 결과가 아니며, '
+    + '과거 성과는 미래의 수익을 보장하지 않습니다.';
 
 /* --- 화면 ---------------------------------------------------------------- */
 
@@ -355,12 +371,13 @@ async function viewSignalDetail(id) {
                 ${scoreBar('최종', 'final_score')}
                 ${scoreBar('기술 지표', 'tech_score', 'BASIC')}
                 ${scoreBar('거래소 합의', 'exchange_consensus_pct', 'BASIC')}
-                ${scoreBar('AI', 'ai_score', 'BASIC')}
                 ${scoreBar('위험', 'risk_score', 'BASIC')}
             </div>
             <p class="meta" style="margin:14px 0 0;color:var(--muted);font-size:12px">
                 최종 점수는 정해진 방향을 얼마나 강하게 지지하는지를 나타냅니다
-                (기술 45% · 합의 20% · AI 20% · 위험 15%).</p>
+                (기술 56.25% · 거래소 합의 25% · 위험 18.75%).
+                <br>점수는 규칙과 통계로만 산출하며, AI 는 아래 근거·위험 요소를
+                설명하는 데만 사용합니다.</p>
         </div>
 
         <div class="grid" style="margin-top:12px">
@@ -372,11 +389,7 @@ async function viewSignalDetail(id) {
                 <div class="price">${fieldOr(s, 'exchange_consensus_pct', (v) => num(v, 0) + '%', 'BASIC')}</div>
                 <div class="meta">${'data_sources' in s && s.data_sources
                     ? esc((s.data_sources.exchanges || []).join(', ')) : ''}</div></div>
-            <div class="card"><div class="meta">상승 / 보합 / 하락</div>
-                <div class="price" style="font-size:16px">
-                    <span class="up">${num(s.up_prob, 0)}%</span> ·
-                    ${num(s.sideways_prob, 0)}% ·
-                    <span class="down">${num(s.down_prob, 0)}%</span></div></div>
+            ${probabilityCard(s)}
         </div>
 
         <h2>근거</h2>
@@ -392,7 +405,14 @@ async function viewBacktest() {
         app().innerHTML = shell('<p class="sub">불러오는 중…</p>', '#/backtest');
         const data = await call(`/backtest/logs?reference_exchange=${reference}`);
 
-        const rows = data.backtests.map((b) => `
+        const rows = data.backtests.map((b) => {
+            // 비용 반영 여부를 숫자 옆에 함께 보여준다. 수수료·슬리피지를 빼고 낸 수익률과
+            // 반영한 수익률은 완전히 다른 값이라, 표기 없이 % 만 두면 오해를 부른다.
+            const cost = b.params?.cost_model;
+            const costText = cost
+                ? `수수료 ${num(cost.fee_rate * 100, 3)}% · 슬리피지 ${num(cost.slippage_rate * 100, 3)}%`
+                : '비용 정보 없음';
+            return `
             <tr>
                 <td><strong>${esc(b.symbol)}</strong></td>
                 <td style="color:var(--muted)">${esc(b.params?.timeframe || '—')}</td>
@@ -403,12 +423,16 @@ async function viewBacktest() {
                 <td class="num">${num(b.win_rate, 1)}%</td>
                 <td class="num">${b.avg_profit_loss_ratio === null ? '—' : num(b.avg_profit_loss_ratio)}</td>
                 <td class="num">${num(b.mdd)}%</td>
-            </tr>`).join('');
+                <td style="color:var(--muted);font-size:12px">${esc(costText)}</td>
+            </tr>`;
+        }).join('');
 
         app().innerHTML = shell(`
             <h1>백테스트</h1>
+            <div class="msg ok" style="margin-bottom:14px">${esc(BACKTEST_NOTE)}</div>
             <p class="sub">기준이 다르면 비용 모델과 체결 가격이 달라 숫자를 비교할 수 없습니다.
-                그래서 한 표에 섞지 않습니다.</p>
+                그래서 한 표에 섞지 않습니다.
+                데이터 출처는 각 거래소 공개 API 이며, 신호는 운영과 같은 룰 엔진으로 재생합니다.</p>
             <div class="tabs">
                 <button class="${reference === 'GLOBAL_CONSENSUS' ? 'on' : ''}" data-ref="GLOBAL_CONSENSUS">
                     신호 검증용 (거래소 합의)</button>
@@ -417,8 +441,8 @@ async function viewBacktest() {
             </div>
             ${rows ? `<div class="table-wrap"><table><thead><tr>
                 <th>심볼</th><th>봉</th><th>구간</th><th class="num">거래</th>
-                <th class="num">수익률</th><th class="num">승률</th>
-                <th class="num">손익비</th><th class="num">MDD</th>
+                <th class="num">시뮬레이션 수익률</th><th class="num">승률</th>
+                <th class="num">손익비</th><th class="num">MDD</th><th>비용 반영</th>
             </tr></thead><tbody>${rows}</tbody></table></div>`
             : '<div class="empty">이 기준으로 실행된 백테스트가 없습니다.</div>'}`, '#/backtest');
 
@@ -453,7 +477,7 @@ function sparkline(points, { width = 640, height = 120 } = {}) {
     const line = coords.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
     const area = `${line} L${width},${height} L0,${height} Z`;
 
-    // 진입 기준선(80). 점수가 이 위로 올라가야 매수 신호가 된다.
+    // 진입 기준선(80). 점수가 이 위로 올라가야 진입 조건이 된다.
     const thresholdY = height - ((80 - min) / span) * height;
     const dots = coords.map(([x, y], i) =>
         `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5"
@@ -475,6 +499,33 @@ function sparkline(points, { width = 640, height = 120 } = {}) {
         <span>진입 기준선 80 (점선)</span>
         <span>${esc(points[points.length - 1].label)}</span>
     </div>`;
+}
+
+/**
+ * 모델 추정 확률 카드.
+ *
+ * 확률 합계가 규격을 벗어나면 모델이 분포를 제대로 못 낸 것이다. 그 숫자를 화면에
+ * 띄우면 유저가 근거 없는 값을 근거로 판단하게 되므로 **아예 보여주지 않는다.**
+ * 기록은 DB 에 남아 있다(모델이 얼마나 자주 이러는지 세야 하므로).
+ */
+function probabilityCard(s) {
+    const reliable = s.data_sources?.ai?.probabilities_reliable;
+    if (reliable === false) {
+        return `<div class="card"><div class="meta">모델 추정 확률</div>
+            <div class="price" style="font-size:15px">${pending('산출 불가')}</div>
+            <div class="meta" style="margin-top:6px">
+                모델이 유효한 확률 분포를 내지 못해 표시하지 않습니다.</div></div>`;
+    }
+    if (s.up_prob === undefined || s.up_prob === null) {
+        return `<div class="card"><div class="meta">모델 추정 확률</div>
+            <div class="price" style="font-size:15px">${locked('BASIC')}</div></div>`;
+    }
+    return `<div class="card"><div class="meta">모델 추정 확률 (상승 / 보합 / 하락)</div>
+        <div class="price" style="font-size:16px">
+            <span class="up">${num(s.up_prob, 0)}%</span> ·
+            ${num(s.sideways_prob, 0)}% ·
+            <span class="down">${num(s.down_prob, 0)}%</span></div>
+        <div class="meta" style="margin-top:6px">${esc(MODEL_OUTPUT_NOTE)}</div></div>`;
 }
 
 /* --- 관리자 -------------------------------------------------------------- */

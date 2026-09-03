@@ -27,11 +27,7 @@ from trading_engine.ai.analyzer import AiAnalysis
 from trading_engine.market.redis_store import RedisStore
 from trading_engine.strategy import store as signal_store
 from trading_engine.strategy.ai_budget import AiBudget
-from trading_engine.strategy.signal_engine import (
-    SIGNAL_HOLD,
-    SignalEngine,
-    SignalEvaluation,
-)
+from trading_engine.strategy.signal_engine import SignalEngine, SignalEvaluation
 
 log = logging.getLogger(__name__)
 
@@ -163,15 +159,20 @@ class SignalPipeline:
     def _apply(
         self, evaluation: SignalEvaluation, analysis: AiAnalysis
     ) -> SignalEvaluation:
-        """AI 점수를 Final Score 에 반영한다. 확률 합계가 이상하면 HOLD 로 강등한다."""
-        if analysis.is_probability_sum_valid:
-            return evaluation.with_ai(analysis.ai_score)
+        """AI 결과를 붙인다. **등급은 바뀌지 않는다** — 등급은 룰이 정한다.
 
-        # 확률 합이 95~105 를 벗어났다는 것은 모델이 분포를 제대로 못 낸 것이다.
-        # 점수는 그대로 반영하되 등급만 HOLD 로 내린다 — 근거가 흔들리는 신호로
-        # 매매까지 가게 두지 않는다. (ROADMAP Step 2 DoD)
+        확률 합계가 95~105 를 벗어나면 모델이 분포를 제대로 못 낸 것이다.
+        **AI 가 점수에서 빠진 뒤로는 그것을 이유로 신호를 강등하지 않는다**
+        (2026-09-03 결정). 룰이 낸 신호를 LLM 이 JSON 을 잘못 만들었다는 이유로
+        약화시키는 것은 앞뒤가 안 맞는다. 대신 **그 확률을 유저에게 보여주지 않는다** —
+        신뢰할 수 없는 숫자를 화면에 띄우는 것이 더 나쁘다.
+        """
+        confirmed = evaluation.with_ai(analysis.ai_score)
+        if analysis.is_probability_sum_valid:
+            return confirmed
+
         log.warning(
-            "%s 확률 합계 %.1f 로 HOLD 강등 (up=%.1f sideways=%.1f down=%.1f)",
+            "%s AI 확률 합계 %.1f (95~105 밖) - 확률은 신뢰 불가로 표시한다 (up=%.1f sideways=%.1f down=%.1f)",
             evaluation.symbol,
             analysis.probability_sum,
             analysis.up_prob,
@@ -179,8 +180,8 @@ class SignalPipeline:
             analysis.down_prob,
         )
         return dataclasses.replace(
-            evaluation.with_ai(analysis.ai_score, signal_type=SIGNAL_HOLD),
-            demoted_reason=f"AI 확률 합계 {analysis.probability_sum:.1f} (95~105 밖)",
+            confirmed,
+            demoted_reason=f"AI 확률 합계 {analysis.probability_sum:.1f} (95~105 밖) - 확률 표시 안 함",
         )
 
     async def _claim(self, evaluation: SignalEvaluation) -> bool:

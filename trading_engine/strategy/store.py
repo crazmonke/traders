@@ -76,6 +76,12 @@ def data_sources_json(evaluation: SignalEvaluation, analysis: AiAnalysis) -> str
         "signal": analysis.signal,
         "score": analysis.ai_score,
         "probability_sum": round(analysis.probability_sum, 2),
+        # up_prob 등은 NOT NULL 이라 값은 그대로 저장한다. 화면이 이 플래그를 보고
+        # 신뢰할 수 없는 확률을 숨긴다 — 기록은 남기되 보여주지는 않는다.
+        "probabilities_reliable": analysis.is_probability_sum_valid,
+        # AI 는 점수에 들어가지 않는다(2026-09-03). 이 값은 "AI 는 이렇게 봤다"는 기록이고,
+        # 나중에 룰과 AI 중 무엇이 맞았는지 비교하는 데 쓴다.
+        "included_in_score": False,
     }
     return json.dumps(sources, ensure_ascii=False)
 

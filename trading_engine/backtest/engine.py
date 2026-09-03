@@ -56,6 +56,7 @@ from trading_engine.backtest import metrics as metrics_mod
 from trading_engine.backtest.costs import CostModel
 from trading_engine.backtest.metrics import Metrics, Trade
 from trading_engine.indicators import calculator
+from trading_engine.strategy import labeling
 from trading_engine.market.exchange_registry import get_spec
 from trading_engine.market.market_manager import MarketManager
 from trading_engine.strategy.consensus import BUY
@@ -95,10 +96,11 @@ class BacktestParams:
     # 기록에 없으면 저장된 결과를 재현할 수 없다.
     timeframe: str = "5m"
     initial_capital: float = 1_000_000.0
-    # 익절·손절 기본값. **스펙(+1.5% / -1.0%)에서 바꿨다** — 2026-09-03 조합 탐색 결과.
-    # 자세한 근거는 아래 "익절·손절 폭" 주석과 ROADMAP 참고.
-    take_profit_pct: float = 5.0
-    stop_loss_pct: float = 2.5
+    # 익절·손절 기본값. **`strategy/labeling.py` 의 상수를 그대로 쓴다** —
+    # 백테스트와 적중률이 같은 정답 정의를 써야 서로를 검증할 수 있다.
+    # 스펙(+1.5% / -1.0%)에서 바꾼 근거는 아래 "익절·손절 폭" 주석과 ROADMAP 참고.
+    take_profit_pct: float = labeling.TAKE_PROFIT_PCT
+    stop_loss_pct: float = labeling.STOP_LOSS_PCT
     # 진입에 요구하는 Final Score. 기본값은 운영 등급의 STRONG_BUY 기준과 같다
     # (`signal_engine.STRONG_THRESHOLD`). 여기서 올려도 **운영 등급 표기는 바뀌지 않는다** —
     # 백테스트로 임계값을 탐색한 뒤에 운영에 반영할지 따로 결정하기 위해 분리했다.

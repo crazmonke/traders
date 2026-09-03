@@ -21,6 +21,7 @@ from trading_engine.indicators.calculator import (
     Indicators,
     classify_bollinger_position,
     classify_ma_trend,
+    is_dead_cross,
     is_golden_cross,
 )
 from trading_engine.market.exchange_registry import get_spec
@@ -48,6 +49,8 @@ WEIGHTED_FIELDS = (
     "orderbook_imbalance",
     "volume_change_rate",
     "atr",
+    "vwap",
+    "vwap_divergence",
     "bb_lower",
     "bb_mid",
     "bb_upper",
@@ -169,6 +172,12 @@ class MarketManager:
                 merged_ma["ma5"], merged_ma["ma20"], merged_ma["ma60"]
             ),
             "macd_golden_cross": is_golden_cross(
+                merged["prev_macd"],
+                merged["prev_macd_signal"],
+                merged["macd"],
+                merged["macd_signal"],
+            ),
+            "macd_dead_cross": is_dead_cross(
                 merged["prev_macd"],
                 merged["prev_macd_signal"],
                 merged["macd"],

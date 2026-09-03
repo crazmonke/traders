@@ -22,15 +22,26 @@ Final Score (prompt.md v2 §3.3):
 `ai_signals.final_score` 인덱스(`idx_score`)와 Step 6 의 `GET /signals/strong` 이
 매도 신호에도 그대로 쓸 수 있다.
 
-AI 를 호출하지 않은 신호(§3.3 필터에 걸린 경우)는 S_AI 를 0 이나 50 으로 채우지 않고
-**남은 가중치를 비례 재분배**한다. 부르지도 않은 AI 가 점수를 밀어 올리거나 끌어내리면
-안 된다.
+### AI 는 점수에 들어가지 않는다 (2026-09-03 결정)
+
+**LLM 은 가격을 예측하지 못한다.** 지표 숫자를 넣고 "상승 확률 81%" 를 물으면 그럴듯한
+숫자를 만들어낼 뿐이고 그 숫자에는 근거가 없다. 검증할 수 없는 값을 점수의 20% 로 쓰면
+전체 점수가 검증 불가능해진다.
+
+그래서 **AI 는 "왜 이 신호가 나왔는지 사람 말로 설명하는" 역할만** 한다. 점수는 규칙과
+통계로만 낸다 — 그래야 백테스트로 검증할 수 있고, 검증할 수 있어야 개선할 수 있다.
+
+가중치는 §3.3 의 구성비에서 AI 몫(20%)을 빼고 **남은 셋을 비례 재분배**한다.
+(원래도 AI 미호출 시 같은 재분배가 일어났으므로 계산 경로는 하나로 합쳐졌다.)
+
+    Tech 45 → 56.25%   Consensus 20 → 25%   Risk 15 → 18.75%
 """
 
 from __future__ import annotations
 
 import logging
 import time
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -45,10 +56,11 @@ from trading_engine.strategy.risk import RiskScore
 
 log = logging.getLogger(__name__)
 
+# §3.3 의 구성비에서 AI 를 뺀 것. 숫자는 스펙 그대로 두고 합이 0.8 이 되게 한 뒤
+# 아래에서 비례 재분배한다 — 스펙과의 대응 관계를 눈으로 확인할 수 있어야 한다.
 FINAL_WEIGHTS: dict[str, float] = {
     "tech": 0.45,
     "consensus": 0.20,
-    "ai": 0.20,
     "risk": 0.15,
 }
 
@@ -73,24 +85,19 @@ def align(value: float, direction: str) -> float:
     return 100.0 - value if direction == SELL else value
 
 
-def final_score(
-    tech: float,
-    consensus_pct: float,
-    risk: float,
-    direction: str,
-    ai: float | None = None,
-) -> float:
-    """§3.3 가중식. AI 가 없으면 남은 가중치를 비례 재분배한다."""
-    parts: dict[str, float] = {
+def final_score(tech: float, consensus_pct: float, risk: float, direction: str) -> float:
+    """§3.3 가중식에서 AI 를 뺀 것. 남은 셋을 비례 재분배한다.
+
+    **AI 점수를 받지 않는다.** 받을 수 있게 열어두면 언젠가 누군가 넣는다.
+    """
+    parts = {
         "tech": align(tech, direction),
         "consensus": consensus_pct,
         "risk": risk,
     }
-    if ai is not None:
-        parts["ai"] = align(ai, direction)
-
-    total_weight = sum(FINAL_WEIGHTS[key] for key in parts)
+    total_weight = sum(FINAL_WEIGHTS.values())
     score = sum(value * FINAL_WEIGHTS[key] for key, value in parts.items()) / total_weight
+
     return min(max(score, 0.0), 100.0)
 
 
@@ -127,34 +134,17 @@ class SignalEvaluation:
         return self.consensus.direction
 
     def with_ai(self, ai_score: float, signal_type: str | None = None) -> "SignalEvaluation":
-        """AI 점수를 반영한 새 평가. (Step 2-b 진입점)
+        """AI 가 낸 점수를 **기록만** 한다. 등급과 Final Score 는 바뀌지 않는다.
 
-        원본을 바꾸지 않는다. 같은 지표 스냅샷에서 나온 "AI 전/후" 점수를 둘 다
-        남길 수 있어야 근거를 설명할 수 있다.
+        AI 는 설명 담당이라 점수에 들어가지 않는다(모듈 주석 참고). 그래도 `ai_score` 를
+        남기는 이유는, 나중에 "룰과 AI 중 무엇이 더 맞았나"를 데이터로 비교하기 위해서다.
+
+        `signal_type` 을 넘기면 그것으로 덮어쓴다 — AI 응답이 망가졌을 때 쓰는 통로다.
         """
-        score = final_score(
-            self.tech.score,
-            self.consensus.pct,
-            self.risk.score,
-            self.direction,
-            ai=ai_score,
-        )
-        return SignalEvaluation(
-            symbol=self.symbol,
-            timeframe=self.timeframe,
-            signal_type=signal_type
-            or classify_signal(
-                self.direction, score, self.consensus.is_sample_sufficient
-            ),
-            tech=self.tech,
-            consensus=self.consensus,
-            risk=self.risk,
-            final_score=score,
+        return dataclasses.replace(
+            self,
             ai_score=ai_score,
-            needs_ai=self.needs_ai,
-            demoted_reason=self.demoted_reason,
-            snapshot=self.snapshot,
-            evaluated_at=self.evaluated_at,
+            signal_type=signal_type or self.signal_type,
         )
 
     def as_dict(self) -> dict[str, Any]:

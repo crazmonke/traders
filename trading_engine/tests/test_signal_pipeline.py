@@ -338,7 +338,7 @@ async def test_restart_mid_candle_still_reuses_the_analysis():
 
 
 @pytest.mark.asyncio
-async def test_broken_probability_distribution_is_demoted_to_hold():
+async def test_broken_probability_does_not_weaken_the_rule_signal():
     broken = AiAnalysis(
         signal="STRONG_BUY",
         ai_score=95.0,
@@ -353,9 +353,10 @@ async def test_broken_probability_distribution_is_demoted_to_hold():
 
     evaluation = await pipeline.run("BTC")
 
-    assert evaluation.signal_type == SIGNAL_HOLD
-    assert "확률 합계" in evaluation.demoted_reason
-    # 강등해도 기록은 남긴다 - 모델이 얼마나 자주 이러는지 봐야 한다.
+    # 룰이 낸 신호를 LLM 이 JSON 을 잘못 만들었다는 이유로 약화시키지 않는다.
+    assert evaluation.signal_type != SIGNAL_HOLD
+    # 대신 그 확률은 신뢰할 수 없다고 표시하고, 화면이 그것을 보고 숨긴다.
+    assert "확률 표시 안 함" in evaluation.demoted_reason
     assert len(calls["save"]) == 1
 
 
@@ -411,7 +412,7 @@ def test_data_sources_json_keeps_the_ai_opinion():
     assert sources["ai"]["signal"] == "BUY"
     assert sources["ai"]["model"] == "test-model"
     assert set(sources["exchanges"]) == {"binance", "okx", "bybit", "coinbase"}
-    assert sources["per_exchange_tech_score"]["binance"] == pytest.approx(92.5)
+    assert sources["per_exchange_tech_score"]["binance"] == pytest.approx(87.5)
 
 
 @pytest.mark.asyncio
