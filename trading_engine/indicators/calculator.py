@@ -24,6 +24,7 @@ STOCH_K = 14
 STOCH_D = 3
 ADX_LENGTH = 14
 CCI_LENGTH = 20
+ATR_LENGTH = 14
 
 # 각 지표가 값을 내려면 필요한 최소 봉 수
 MIN_RSI_CANDLES = RSI_LENGTH + 1
@@ -32,6 +33,7 @@ MIN_BBANDS_CANDLES = BBANDS_LENGTH
 MIN_STOCH_CANDLES = STOCH_K + STOCH_D
 MIN_ADX_CANDLES = ADX_LENGTH * 2  # DM 평활에 워밍업이 한 주기 더 필요하다
 MIN_CCI_CANDLES = CCI_LENGTH
+MIN_ATR_CANDLES = ATR_LENGTH + 1  # 첫 TR 은 직전 종가가 있어야 나온다
 
 BB_BELOW_LOWER = "BELOW_LOWER"
 BB_LOWER_HALF = "LOWER_HALF"
@@ -69,6 +71,18 @@ class Indicators:
     cci: float | None
     orderbook_imbalance: float | None
     volume_change_rate: float | None
+    atr: float | None
+    # 직전 봉 값. Step 2 배점표에는 "하단 이탈 후 복귀", "%K 가 %D 를 상향 돌파",
+    # "CCI 가 -100 이하에서 반등" 처럼 한 봉 전과 비교해야 판정되는 항목이 있다.
+    # 판정 자체(=배점)는 RuleEngine 이 하고, 여기서는 재료만 숫자로 내놓는다.
+    prev_close: float | None
+    prev_macd: float | None
+    prev_macd_signal: float | None
+    prev_bb_lower: float | None
+    prev_bb_upper: float | None
+    prev_stochastic_k: float | None
+    prev_stochastic_d: float | None
+    prev_cci: float | None
     candle_count: int
     candle_ts: int | None
 
@@ -81,6 +95,16 @@ def _last(series: pd.Series | None) -> float | None:
     if series is None or len(series) == 0:
         return None
     value = series.iloc[-1]
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def _prev(series: pd.Series | None) -> float | None:
+    """마지막에서 두 번째 값(직전 봉). 없거나 NaN 이면 None."""
+    if series is None or len(series) < 2:
+        return None
+    value = series.iloc[-2]
     if pd.isna(value):
         return None
     return float(value)
@@ -116,6 +140,23 @@ def compute_cci(
     )
     # 평균편차 0 (완전 평탄) 이면 정의되지 않는다. inf 대신 NaN 으로 둔다.
     return (typical - sma) / (0.015 * mean_dev.replace(0.0, pd.NA))
+
+
+def compute_atr(
+    high: pd.Series, low: pd.Series, close: pd.Series, length: int = ATR_LENGTH
+) -> pd.Series:
+    """ATR = Wilder 평활한 True Range. TR = max(고-저, |고-직전종가|, |저-직전종가|).
+
+    `pandas_ta.atr` 를 쓰지 않는다. 버전에 따라 반환형(Series/DataFrame)과 기본 평활
+    방식(RMA/EMA/SMA)이 달라져, 같은 캔들에도 다른 값이 나온다. 이 값은 S_Risk 감점에
+    직접 들어가므로 라이브러리 버전에 흔들리지 않게 직접 계산한다. (compute_cci 와 같은 이유)
+    """
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    # Wilder 평활은 alpha=1/length 인 지수이동평균과 같다.
+    return true_range.ewm(alpha=1.0 / length, adjust=False, min_periods=length).mean()
 
 
 def classify_bollinger_position(
@@ -163,15 +204,25 @@ def compute_orderbook_imbalance(
     return (bid - ask) / total
 
 
+def is_golden_cross(
+    prev_macd: float | None,
+    prev_signal: float | None,
+    macd: float | None,
+    signal: float | None,
+) -> bool:
+    """직전 봉에서 시그널 아래였던 MACD가 이번 봉에 위로 올라섰는지.
+
+    거래소별 스냅샷과 글로벌 가중 평균 스냅샷 양쪽에서 같은 판정을 쓰기 위해
+    Series 가 아니라 네 개의 스칼라를 받는다.
+    """
+    if None in (prev_macd, prev_signal, macd, signal):
+        return False
+    return bool(prev_macd <= prev_signal and macd > signal)
+
+
 def detect_golden_cross(macd: pd.Series, signal: pd.Series) -> bool:
-    """직전 봉에서 시그널 아래였던 MACD가 이번 봉에 위로 올라섰는지."""
-    if macd is None or signal is None or len(macd) < 2 or len(signal) < 2:
-        return False
-    prev_macd, curr_macd = macd.iloc[-2], macd.iloc[-1]
-    prev_signal, curr_signal = signal.iloc[-2], signal.iloc[-1]
-    if any(pd.isna(v) for v in (prev_macd, curr_macd, prev_signal, curr_signal)):
-        return False
-    return bool(prev_macd <= prev_signal and curr_macd > curr_signal)
+    """`is_golden_cross` 의 Series 판. 마지막 두 봉만 본다."""
+    return is_golden_cross(_prev(macd), _prev(signal), _last(macd), _last(signal))
 
 
 def compute_volume_change_rate(volumes: pd.Series) -> float | None:
@@ -200,11 +251,15 @@ def compute(
     close_price = volume_change = None
     candle_ts = None
     bb_lower = bb_mid = bb_upper = None
-    stoch_k = stoch_d = adx_value = cci_value = None
+    stoch_k = stoch_d = adx_value = cci_value = atr_value = None
+    prev_close = prev_macd = prev_macd_signal = None
+    prev_bb_lower = prev_bb_upper = None
+    prev_stoch_k = prev_stoch_d = prev_cci = None
 
     if count:
         close = df["close"].astype(float)
         close_price = _last(close)
+        prev_close = _prev(close)
         candle_ts = int(df["ts"].iloc[-1]) if "ts" in df else None
         volume_change = compute_volume_change_rate(df["volume"].astype(float))
 
@@ -220,7 +275,11 @@ def compute(
                 macd_value = _last(macd_line)
                 macd_signal_value = _last(signal_line)
                 macd_hist = _last(macd_df[f"MACDh_{suffix}"])
-                golden_cross = detect_golden_cross(macd_line, signal_line)
+                prev_macd = _prev(macd_line)
+                prev_macd_signal = _prev(signal_line)
+                golden_cross = is_golden_cross(
+                    prev_macd, prev_macd_signal, macd_value, macd_signal_value
+                )
 
         for period in MA_PERIODS:
             if count >= period:
@@ -231,21 +290,34 @@ def compute(
 
         if count >= MIN_BBANDS_CANDLES:
             bb = ta.bbands(close, length=BBANDS_LENGTH, std=BBANDS_STD)
-            bb_lower = _last(_column(bb, "BBL_"))
+            lower_band = _column(bb, "BBL_")
+            upper_band = _column(bb, "BBU_")
+            bb_lower = _last(lower_band)
             bb_mid = _last(_column(bb, "BBM_"))
-            bb_upper = _last(_column(bb, "BBU_"))
+            bb_upper = _last(upper_band)
+            prev_bb_lower = _prev(lower_band)
+            prev_bb_upper = _prev(upper_band)
 
         if count >= MIN_STOCH_CANDLES:
             stoch = ta.stoch(high, low, close, k=STOCH_K, d=STOCH_D)
-            stoch_k = _last(_column(stoch, "STOCHk_"))
-            stoch_d = _last(_column(stoch, "STOCHd_"))
+            k_line = _column(stoch, "STOCHk_")
+            d_line = _column(stoch, "STOCHd_")
+            stoch_k = _last(k_line)
+            stoch_d = _last(d_line)
+            prev_stoch_k = _prev(k_line)
+            prev_stoch_d = _prev(d_line)
 
         if count >= MIN_ADX_CANDLES:
             adx_frame = ta.adx(high, low, close, length=ADX_LENGTH)
             adx_value = _last(_column(adx_frame, "ADX_"))
 
         if count >= MIN_CCI_CANDLES:
-            cci_value = _last(compute_cci(high, low, close, CCI_LENGTH))
+            cci_line = compute_cci(high, low, close, CCI_LENGTH)
+            cci_value = _last(cci_line)
+            prev_cci = _prev(cci_line)
+
+        if count >= MIN_ATR_CANDLES:
+            atr_value = _last(compute_atr(high, low, close, ATR_LENGTH))
 
     orderbook = orderbook or {}
     imbalance = compute_orderbook_imbalance(
@@ -276,6 +348,15 @@ def compute(
         cci=cci_value,
         orderbook_imbalance=imbalance,
         volume_change_rate=volume_change,
+        atr=atr_value,
+        prev_close=prev_close,
+        prev_macd=prev_macd,
+        prev_macd_signal=prev_macd_signal,
+        prev_bb_lower=prev_bb_lower,
+        prev_bb_upper=prev_bb_upper,
+        prev_stochastic_k=prev_stoch_k,
+        prev_stochastic_d=prev_stoch_d,
+        prev_cci=prev_cci,
         candle_count=count,
         candle_ts=candle_ts,
     )

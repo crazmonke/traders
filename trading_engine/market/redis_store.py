@@ -13,6 +13,7 @@ v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
     exchange:{code}:{symbol}:indicators -> String(JSON)
     global:{symbol}:price               -> String(JSON)  # 거래량 가중 평균
     global:{symbol}:indicators          -> String(JSON)
+    consensus:{symbol}:{tf}             -> String(JSON)  # 거래소 간 합의·점수 (Step 2)
 """
 
 from __future__ import annotations
@@ -48,6 +49,10 @@ def exchange_key(exchange: str, symbol: str, kind: str) -> str:
 
 def global_key(symbol: str, kind: str) -> str:
     return f"global:{symbol}:{kind}"
+
+
+def consensus_key(symbol: str, timeframe: str = "5m") -> str:
+    return f"consensus:{symbol}:{timeframe}"
 
 
 class RedisStore:
@@ -116,6 +121,14 @@ class RedisStore:
 
     async def save_global_indicators(self, symbol: str, payload: dict[str, Any]) -> None:
         await self._set_json(global_key(symbol, "indicators"), payload, ttl=self._indicator_ttl)
+
+    async def save_consensus(
+        self, symbol: str, payload: dict[str, Any], timeframe: str = "5m"
+    ) -> None:
+        """거래소 간 합의 결과. 지표와 같은 TTL 을 준다 — 지표가 낡으면 합의도 낡는다."""
+        await self._set_json(
+            consensus_key(symbol, timeframe), payload, ttl=self._indicator_ttl
+        )
 
     async def save_indicators(self, market: str, payload: dict[str, Any]) -> None:
         await self._set_json(indicators_key(market), payload, ttl=self._indicator_ttl)

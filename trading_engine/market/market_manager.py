@@ -17,7 +17,12 @@ import logging
 import time
 from typing import Any
 
-from trading_engine.indicators.calculator import Indicators, classify_ma_trend
+from trading_engine.indicators.calculator import (
+    Indicators,
+    classify_bollinger_position,
+    classify_ma_trend,
+    is_golden_cross,
+)
 from trading_engine.market.exchange_registry import get_spec
 from trading_engine.market.redis_store import RedisStore
 
@@ -26,7 +31,11 @@ log = logging.getLogger(__name__)
 # 글로벌 평균에 넣을 견적통화
 USD_QUOTES = frozenset({"USDT", "USD", "USDC"})
 
-# 가중 평균을 낼 수치형 지표
+# 가중 평균을 낼 수치형 지표.
+#
+# 불리언·문자열 판정(골든크로스, 볼린저 위치)은 여기 넣지 않는다. 거래소별 판정을
+# 다수결로 합치는 대신, 숫자를 먼저 가중 평균한 뒤 거래소별과 **같은 분류 함수**에
+# 통과시킨다. 그래야 "글로벌 지표로 매긴 점수"와 "거래소별 점수"가 같은 규칙으로 나온다.
 WEIGHTED_FIELDS = (
     "rsi",
     "macd",
@@ -38,6 +47,18 @@ WEIGHTED_FIELDS = (
     "cci",
     "orderbook_imbalance",
     "volume_change_rate",
+    "atr",
+    "bb_lower",
+    "bb_mid",
+    "bb_upper",
+    "prev_close",
+    "prev_macd",
+    "prev_macd_signal",
+    "prev_bb_lower",
+    "prev_bb_upper",
+    "prev_stochastic_k",
+    "prev_stochastic_d",
+    "prev_cci",
 )
 
 
@@ -70,6 +91,19 @@ class MarketManager:
 
     def record_indicators(self, exchange: str, symbol: str, indicators: Indicators) -> None:
         self._indicators[(exchange, symbol)] = indicators
+
+    def indicators_for(self, base: str) -> dict[str, Indicators]:
+        """한 심볼의 거래소별 지표. 견적통화와 무관하게 전부 담는다.
+
+        글로벌 가중 평균가에서는 KRW 거래소를 빼지만(위 모듈 주석), 거래소 간 합의
+        계산에는 넣어야 한다. RSI·MACD 같은 지표는 통화 단위와 무관하고, §3.2 의
+        "데이터가 유효한 전체 거래소"는 업비트를 포함하기 때문이다.
+        """
+        return {
+            exchange: indicators
+            for (exchange, symbol), indicators in self._indicators.items()
+            if base_of(symbol) == base
+        }
 
     def _weight(self, exchange: str, symbol: str) -> float:
         """가중치는 24시간 견적통화 거래대금. 없으면 0(동등 가중으로 물러선다)."""
@@ -118,16 +152,30 @@ class MarketManager:
             return None
 
         merged_ma = {name: weighted_average(values) for name, values in mas.items()}
+        merged = {field: weighted_average(values) for field, values in field_values.items()}
+        price = weighted_average(prices)
         return {
             "symbol": base,
-            "price": weighted_average(prices),
+            "price": price,
+            # RuleEngine 은 거래소별 스냅샷(Indicators.as_dict())과 이 딕셔너리를 같은
+            # 키 이름으로 읽는다. 그래서 종가를 `close` 로도 싣는다.
+            "close": price,
             "upbit_price": upbit_price,
             "sources": sorted(sources),
             "source_count": len(sources),
-            **{field: weighted_average(values) for field, values in field_values.items()},
+            **merged,
             **merged_ma,
             "ma_trend": classify_ma_trend(
                 merged_ma["ma5"], merged_ma["ma20"], merged_ma["ma60"]
+            ),
+            "macd_golden_cross": is_golden_cross(
+                merged["prev_macd"],
+                merged["prev_macd_signal"],
+                merged["macd"],
+                merged["macd_signal"],
+            ),
+            "bollinger_position": classify_bollinger_position(
+                price, merged["bb_lower"], merged["bb_mid"], merged["bb_upper"]
             ),
             "updated_at": int(time.time() * 1000),
         }

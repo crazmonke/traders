@@ -1,7 +1,7 @@
 """Trading Engine 엔트리포인트.
 
-현재 단계: Step 1 — ccxt 다중 거래소 수집 + 거래소별 지표 + 글로벌 가중 평균.
-Step 2(Consensus·RuleEngine·OpenAI)는 indicator_engine.on_indicators() 로 붙인다.
+현재 단계: Step 2-a — 수집·지표(Step 1) 위에 거래소 간 합의와 룰 엔진 점수를 얹었다.
+OpenAI 호출과 `ai_signals` 저장/publish 는 Step 2-b 에서 SignalEngine 결과에 붙인다.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from trading_engine.market.exchange_feed import ExchangeFeed
 from trading_engine.market.exchange_registry import resolve_specs
 from trading_engine.market.market_manager import MarketManager, base_of
 from trading_engine.market.redis_store import RedisStore
+from trading_engine.strategy.signal_engine import SignalEngine
 
 log = logging.getLogger(__name__)
 
@@ -41,11 +42,13 @@ async def run() -> None:
 
     manager = MarketManager(store)
     indicator_engine = IndicatorEngine(store)
+    signal_engine = SignalEngine(manager, store)
 
     async def on_indicators(exchange: str, symbol: str, indicators: Indicators) -> None:
-        """거래소 지표가 갱신될 때마다 글로벌 집계를 다시 낸다."""
+        """거래소 지표가 갱신될 때마다 글로벌 집계와 합의를 다시 낸다."""
         manager.record_indicators(exchange, symbol, indicators)
-        snapshot = await manager.publish(base_of(symbol))
+        base = base_of(symbol)
+        snapshot = await manager.publish(base)
         if snapshot:
             log.debug(
                 "글로벌 갱신 %s price=%s sources=%d rsi=%s",
@@ -53,6 +56,20 @@ async def run() -> None:
                 snapshot["price"],
                 snapshot["source_count"],
                 snapshot["rsi"],
+            )
+        # 집계가 끝난 뒤에 평가해야 같은 스냅샷을 본다. 자체 스로틀이 있어
+        # 거래소 수만큼 중복 계산되지는 않는다.
+        evaluation = await signal_engine.publish(base)
+        if evaluation:
+            log.info(
+                "신호 %s %s final=%.1f tech=%.1f consensus=%.0f%% (%d개 거래소)%s",
+                evaluation.symbol,
+                evaluation.signal_type,
+                evaluation.final_score,
+                evaluation.tech.score,
+                evaluation.consensus.pct,
+                evaluation.consensus.valid_count,
+                " AI 호출 대상" if evaluation.needs_ai else "",
             )
 
     indicator_engine.on_indicators(on_indicators)

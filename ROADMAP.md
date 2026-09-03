@@ -46,7 +46,7 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | 완료 | 스텝 | 목표 | 착수 전 상태 | 완료일 |
 | --- | --- | --- | --- | --- |
 | [x] | **1** | 다중 거래소(ccxt) 수집 + 지표 엔진 확장 (`market/`, `indicators/`) | 부분 완료 — Upbit 단일 버전 존재, 4개 거래소 추가 + 지표 4종 추가 필요 | 2026-09-02 |
-| [ ] | **2** | Consensus 계산 + RuleEngine + OpenAI 연동 + `ai_signals` 저장 (`strategy/`, `ai/`, `database/`) | 0% — 빈 패키지 | |
+| [~] | **2** | Consensus 계산 + RuleEngine + OpenAI 연동 + `ai_signals` 저장 (`strategy/`, `ai/`, `database/`) | 0% — 빈 패키지 | 2-a 완료 2026-09-03 |
 | [ ] | **3** | 유저별 TradingView 웹훅 연동, 멀티테넌트 PRO 기능 (`external/`, PHP `webhooks` API) | 0% — 신규 모듈 | |
 | [ ] | **4** | 백테스팅 엔진, 신호검증용/업비트실전용 분리, 수수료·슬리피지 반영 (`backtest/`) | 0% — 빈 패키지 | |
 | [ ] | **5** | 실거래 안전장치 + 매매 실행, Upbit 전용 (`trading/`) | 0% — 테이블만 있고 읽는 코드 없음 | |
@@ -57,6 +57,40 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | [ ] | **10** | 다국어 지원 (ko/en/ja, 확장 가능 구조) | 0% — 신규, `lang/` 디렉터리 없음 | |
 | [~] | **11** | 외부 데이터 아카이브 — 코인 뉴스 + 매크로 지표/캘린더 수집 (`external/`) | 0% — 신규, 설계만 (`docs/EXTERNAL_DATA.md`) | 11-a 완료 2026-09-02 |
 | [ ] | **12** | 뉴스 메뉴 + 커뮤니티 (목록·상세·투표·댓글) | 0% — 신규 | |
+
+## Step 2-a — Consensus + RuleEngine — **완료 2026-09-03**
+
+**산출물**: `strategy/consensus.py`(§3.2), `strategy/rule_engine.py`(§3.3 배점표),
+`strategy/risk.py`(S_Risk), `strategy/signal_engine.py`(Final Score·등급·AI 호출 게이트·
+`consensus:{symbol}:{tf}` 캐싱). `indicators/calculator.py`에 직전 봉 값 8종과 ATR 추가,
+`market/market_manager.py`가 그 값들을 가중 평균해 글로벌 스냅샷에 싣는다. 테스트 48건
+(전체 110건). `main.py`에 연결돼 지표가 갱신될 때마다 심볼 단위로 평가된다(5초 스로틀).
+
+**Step 2-b 로 남긴 것**: OpenAI 호출, 확률 합계 95~105 검증, `ai_signals` 저장,
+`channel:signals` publish, Redis TTL 키 기반 중복 호출 차단. `SignalEvaluation.with_ai()`
+가 그 진입점이다.
+
+### 이번에 정한 것 (prompt.md 에 없던 부분)
+
+1. **배점표 기준점 40점** — §3.3 가감점이 상승 쪽에 치우쳐(+110/-30) 중립 시장의 점수가
+   10점이 되고, §3.2 의 방향 임계값(60/40)과 어긋나 **조용한 장이 합의 100% STRONG_SELL
+   로 나가고 AI 호출까지 발생**했다. 기준점 40 을 두어 중립 = 50 으로 맞췄다.
+   가감점 숫자와 clamp 는 그대로다. `prompt.md` §3.3 에 반영 완료.
+2. **Final Score 의 방향 정합** — 가중식을 글자 그대로 쓰면 합의율·위험 점수가 매수 쪽으로만
+   가산돼, 5개 거래소가 합의한 강한 하락 신호가 중간 점수를 받는다. Final Score 를
+   "정해진 방향을 얼마나 강하게 지지하는가"로 정의하고 방향성 항목(S_Tech, S_AI)만
+   SELL 진영에서 뒤집는다. 구성비(45/20/20/15)는 스펙 그대로다.
+   → `ai_signals.final_score` 와 `idx_score` 가 매도 신호에도 그대로 쓰인다(Step 6 `/signals/strong`).
+3. **AI 미호출 시 가중치 재분배** — S_AI 를 0 이나 50 으로 채우지 않고 남은 가중치를
+   비례 재분배한다. 부르지도 않은 AI 가 점수를 움직이면 안 된다.
+4. **등급 임계값** — Final 80 이상 STRONG_*, 60 이상 BUY/SELL, 그 미만 HOLD.
+   방향은 §3.2 다수 진영이 정하고 점수는 세기만 정한다. 표본 3개 미만이면 무조건 HOLD.
+5. **S_Risk 감점 폭** — ATR 을 현재가 대비 비율로 보고 1.5%/3%/5% 구간에 -10/-25/-40,
+   유효 거래소 4/3/2개에 -10/-20/-40. 근거는 `strategy/risk.py` 주석에 있다.
+
+**재보정 대상(Step 7 이후)**: 위 3·4·5 의 숫자는 적중률 데이터 없이 정한 초기값이다.
+특히 단순 상승 추세(정배열+ADX 30+매수 호가 우위, 이벤트 없음)가 tech 82.5 → STRONG_BUY
+로 나가는데, 이게 과한지는 `ai_signal_results` 가 쌓여야 판단할 수 있다.
 
 ## Step 0 — DB 마이그레이션 (신규, 착수 전 필수) — **완료 2026-09-02**
 
@@ -131,7 +165,7 @@ AI 20/Risk 15)이 필요하므로 `prompt.md` §3.3 개정이 선행되어야 �
 | 9/2 (수) | ~~Step 0 — DB 마이그레이션 (exchanges, user_webhooks, external_signals, users.locale, ai_signals 컬럼 추가)~~ 완료 |
 | 9/2 (수) | ~~Step 1-a — ccxt 거래소 어댑터 추상화 + Binance/OKX 추가~~ 완료 (9/3 예정분 선행) |
 | 9/2 (수) | ~~Step 1-b — Bybit/Coinbase 추가 + 지표 4종 + 글로벌 가중 평균~~ 완료 (9/3 예정분 선행) |
-| 9/3 (목) | Step 2-a — Consensus 계산 + RuleEngine 재작성 |
+| 9/3 (목) | ~~Step 2-a — Consensus 계산 + RuleEngine 재작성~~ 완료 |
 | 9/4 (금) | Step 2-b — OpenAI 연동 + `ai_signals` 저장/publish |
 | 9/5 (토) | Step 3-a — 유저 웹훅 발급/재발급 API (PHP) |
 | 9/6 (일) | Step 3-b — 멀티테넌트 웹훅 수신 엔드포인트 (Python) + 유저 격리 테스트 |
