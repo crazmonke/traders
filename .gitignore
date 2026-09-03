@@ -12,6 +12,7 @@ trading_engine/__pycache__/
 
 # PHP
 api/vendor/
+api/.phpunit.result.cache
 # composer.lock 은 커밋한다 - 서버와 로컬이 동일한 패키지 버전을 쓰도록 보장
 
 # Node (frontend, if added later)

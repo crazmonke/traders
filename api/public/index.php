@@ -61,7 +61,7 @@ if ($method === 'OPTIONS') {
     exit;
 }
 
-/** JSON 응답 후 종료. */
+/** JSON 응답 후 종료. (구 엔드포인트용 - 신규는 App\Http\Response 를 쓴다) */
 function respond(array $body, int $status = 200): never
 {
     http_response_code($status);
@@ -71,6 +71,15 @@ function respond(array $body, int $status = 200): never
 }
 
 // ------------------------------------------------------------------ 라우팅
+
+// 유저별 TradingView 웹훅 관리 (Step 3-a). 하위 경로(/{id}, /{id}/rotate)가 있어
+// switch 앞에서 접두사로 먼저 가른다.
+const WEBHOOK_ROUTE = '/api/v1/webhooks/tradingview';
+
+if ($path === WEBHOOK_ROUTE || str_starts_with($path, WEBHOOK_ROUTE . '/')) {
+    (new App\Http\Webhooks())->handle($method, substr($path, strlen(WEBHOOK_ROUTE)));
+}
+
 switch ($path) {
     case '/api/health':
         $health = App\Http\Health::check();
@@ -81,17 +90,13 @@ switch ($path) {
         respond([
             'success'   => true,
             'message'   => 'AI Trading API',
-            'endpoints' => ['/api/health'],
+            'endpoints' => ['/api/health', WEBHOOK_ROUTE],
         ]);
 }
 
-// Step 5 엔드포인트가 추가되기 전까지 /api/* 는 JSON 404 로 응답한다.
+// 나머지 엔드포인트가 추가되기 전까지 /api/* 는 JSON 404 로 응답한다.
 if (str_starts_with($path, '/api/')) {
-    respond([
-        'success' => false,
-        'error'   => 'Not Found',
-        'path'    => $path,
-    ], 404);
+    App\Http\Response::error(App\Http\Response::NOT_FOUND, '없는 경로입니다.', 404);
 }
 
 // 그 외 경로는 정적 페이지가 없는 것이므로 HTML 404.

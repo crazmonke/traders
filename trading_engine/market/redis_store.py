@@ -18,6 +18,7 @@ v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
     ai:result:{symbol}:{tf}             -> String(JSON)  # 그 봉의 AI 분석 (재사용용)
     ai:seed:{symbol}                    -> String(TTL)   # seed 모드 호출 간격 (Step 2)
     watch:{symbol}                      -> String(TTL)   # 이 심볼을 보고 있는 유저 (Step 6·9)
+    webhook:rate:{token}:{minute}       -> String(TTL)   # 토큰별 수신 제한 (Step 3-b)
     channel:signals                     -> Pub/Sub       # 확정된 신호 (Step 2)
 """
 
@@ -198,6 +199,19 @@ class RedisStore:
     ) -> dict[str, Any] | None:
         raw = await self._client.get(ai_result_key(symbol, timeframe))
         return json.loads(raw) if raw else None
+
+    async def incr_with_expire(self, key: str, ttl: int) -> int:
+        """키를 1 올리고 TTL 을 건다. 올린 뒤의 값을 돌려준다.
+
+        INCR 과 EXPIRE 를 파이프라인으로 묶는다. 따로 보내면 두 명령 사이에 프로세스가
+        죽었을 때 TTL 없는 키가 남아 그 토큰이 영구히 막힌다.
+        """
+        pipe = self._client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ttl)
+        result = await pipe.execute()
+
+        return int(result[0])
 
     async def publish_signal(self, payload: dict[str, Any]) -> int:
         """확정된 신호를 `channel:signals` 로 publish. 반환값은 수신한 구독자 수."""

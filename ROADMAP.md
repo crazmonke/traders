@@ -47,7 +47,7 @@ Step 1은 "폐기 후 재작성"이 아니라 **"단일 거래소 구현을 다�
 | --- | --- | --- | --- | --- |
 | [x] | **1** | 다중 거래소(ccxt) 수집 + 지표 엔진 확장 (`market/`, `indicators/`) | 부분 완료 — Upbit 단일 버전 존재, 4개 거래소 추가 + 지표 4종 추가 필요 | 2026-09-02 |
 | [x] | **2** | Consensus 계산 + RuleEngine + OpenAI 연동 + `ai_signals` 저장 (`strategy/`, `ai/`, `database/`) | 0% — 빈 패키지 | 2026-09-03 |
-| [ ] | **3** | 유저별 TradingView 웹훅 연동, 멀티테넌트 PRO 기능 (`external/`, PHP `webhooks` API) | 0% — 신규 모듈 | |
+| [x] | **3** | 유저별 TradingView 웹훅 연동, 멀티테넌트 PRO 기능 (`external/`, PHP `webhooks` API) | 0% — 신규 모듈 | 2026-09-03 |
 | [ ] | **4** | 백테스팅 엔진, 신호검증용/업비트실전용 분리, 수수료·슬리피지 반영 (`backtest/`) | 0% — 빈 패키지 | |
 | [ ] | **5** | 실거래 안전장치 + 매매 실행, Upbit 전용 (`trading/`) | 0% — 테이블만 있고 읽는 코드 없음 | |
 | [ ] | **6** | PHP REST API (signals / market / backtest / safety, JWT, Rate Limit) | ~5% — 라우터·CORS 골격 + `/api/health`만 | |
@@ -176,6 +176,100 @@ Redis 키 `ai:called:{symbol}:{tf}`(중복 호출 차단), `ai:result:{symbol}:{
   보려면 필요하다.
 - **확률 합계 이상은 강등하되 저장은 한다.** 모델이 얼마나 자주 이러는지 세야 한다.
 
+## Step 3 — 유저별 TradingView 웹훅 (PRO) — **완료 2026-09-03**
+
+### 3-a — 발급/재발급 API (PHP)
+
+**산출물**: `api/src/Http/Webhooks.php`(엔드포인트 4종), `api/src/Repository/WebhookRepository.php`,
+`api/src/Auth/Jwt.php`, `api/src/Utils/WebhookToken.php`, `api/src/Http/Response.php`(공통 포맷),
+라우터 연결. **PHPUnit 도입** — `api/phpunit.xml`, 테스트 24건, `composer test`,
+`ci.yml` 의 php-tests 주석 해제.
+
+```
+POST   /api/v1/webhooks/tradingview             발급
+GET    /api/v1/webhooks/tradingview             내 목록
+POST   /api/v1/webhooks/tradingview/{id}/rotate 재발급(폐기 후 발급)
+DELETE /api/v1/webhooks/tradingview/{id}        폐기
+```
+
+**실측 검증(2026-09-03)**: 로컬 MySQL + PHP 내장 서버로 전 경로 확인 —
+인증 없음/엉터리 토큰/없는 유저 401, 유저 격리(A 2건·B 1건), **유저 B 가 유저 A 의 id 를
+조작하면 403 이 아니라 404**, 재발급 시 새 행 생성 + 기존 행 폐기, 405/404/400 처리.
+검증용 데이터는 삭제했다.
+
+### 정한 것
+
+1. **JWT 검증을 Step 6-b 에서 당겨왔다.** 웹훅 발급은 "로그인 유저"를 식별해야 하는데
+   인증 계층이 아예 없었다. `firebase/php-jwt` 는 이미 composer.json 에 있었다.
+   **로그인 엔드포인트·갱신 토큰·Rate Limit 은 6-b 에 그대로 남는다** — `Jwt::issue()` 는
+   6-b 의 로그인과 개발용이다.
+2. **남의 리소스는 404** (403 아님). 403 은 "그 id 는 존재한다"를 알려주는 것과 같다.
+   저장소의 모든 조회·변경 쿼리에 `user_id` 조건이 들어간다.
+3. **재발급은 토큰 교체가 아니라 새 행 생성**이다. `external_signals.user_webhook_id` 가
+   기존 행을 참조하므로, 같은 행의 토큰을 갈아끼우면 예전에 받은 신호가 새 토큰으로
+   들어온 것처럼 보인다. 폐기도 행을 지우지 않고 `revoked_at` 만 채운다.
+4. **목록 조회(GET)를 추가**했다. prompt.md 는 발급·폐기·재발급만 적었지만, 목록 없이는
+   유저가 자기 웹훅을 관리할 수 없고 Step 9 UI 도 만들 수 없다.
+5. 토큰은 `random_bytes(32)` → base64url(패딩 제거) = **정확히 43자**로
+   `webhook_token CHAR(43)` 에 맞춘다.
+
+### 구현 중 잡은 결함 2건
+
+- `Jwt::userIdFrom` 의 `catch (\Throwable)` 이 **JWT_SECRET 미설정 예외까지 삼켰다.**
+  설정이 잘못된 서버가 500 이 아니라 전부 401 을 돌려줘 원인을 못 찾게 된다.
+  비밀키 조회를 try 밖으로 뺐고 회귀 테스트를 넣었다.
+- DB 연결 실패 시 **PDOException 스택 트레이스(DSN·파일 경로 포함)가 HTTP 200 과 함께
+  노출**됐다. 핸들러에 오류 경계를 넣어 로그에만 남기고 규격대로 500 을 응답한다.
+
+### 배포 전 필수 조치
+
+**`.env` 의 `JWT_SECRET` 이 자리표시자(`change_me_to_a_long_random_string`) 그대로다.**
+`Jwt::secret()` 이 이 값을 거부하므로 **웹훅 API 가 서버에서 500 을 반환한다**(인증을
+열어주는 대신 막는 쪽으로 설계했다). 32자 이상 랜덤 문자열로 교체해야 한다.
+`WEBHOOK_BASE_URL` 도 비어 있으면 `APP_URL` 을 쓰므로, 수신 경로(Step 3-b)가
+다른 호스트면 지정해야 한다.
+
+### 3-b — 수신 엔드포인트 (Python) + 유저 격리 (9/6 예정분 선행)
+
+**산출물**: `external/tradingview/receiver.py`(FastAPI `POST /webhook/tv/{token}`),
+`store.py`(`external_signals` 저장), `ratelimit.py`(토큰별 분당 제한),
+`RedisStore.incr_with_expire`, `main.py` 연결, `deploy/nginx` 에 `/webhook/tv/` proxy_pass.
+테스트 27건(Python 전체 177건).
+
+**엔진이 처음으로 포트를 연다.** 지금까지는 거래소·Redis·MySQL 로 나가기만 하는 데몬이었다.
+uvicorn 을 `Server.serve()` 코루틴으로 수집 태스크와 같은 이벤트 루프에 띄운다
+(`uvicorn.run()` 은 자기 루프를 새로 만들어 쓸 수 없다).
+`WEBHOOK_ENABLED=0` 으로 끄면 서버를 띄우지 않고, 꺼도 Step 1·2 는 그대로 돈다.
+
+**실측 검증(2026-09-03)** — PHP 와 Python 을 함께 띄워 교차 확인:
+PHP 로 유저 A·B 에게 웹훅 발급 → **발급된 URL 로 Python 수신** → `external_signals` 에
+각자의 `user_id`/`user_webhook_id` 로 저장 → `last_received_at` 갱신.
+최근 `ai_signals` 가 있을 때 `linked_signal_id` 연결(=12) 확인, **연결 후에도 그 신호의
+점수·등급은 그대로**(72/65/80). 없는 토큰 404, 필수 필드 누락 400, 분당 5회 제한에서
+6번째 429. 같은 프로세스에서 거래소 수집·신호 산출이 계속 도는 것도 확인(20건).
+검증 데이터는 모두 삭제했다.
+
+#### 정한 것
+
+1. **형식 오류와 없는 토큰을 구분하지 않는다.** 둘 다 404 에 같은 문구다. 구분해 알려주면
+   토큰을 긁는 쪽에 형식 정보를 준다. 형식 검사(43자 base64url)는 DB 조회 전에 하되
+   응답은 같다.
+2. **수신 앱에 다른 엔드포인트를 두지 않는다.** 공개 주소라 `docs_url`/`openapi_url` 도
+   끈다. `/docs`·`/openapi.json` 이 404 인지 테스트로 고정했다.
+3. **Redis 장애 시 수신을 통과시킨다.** 제한 확인 실패로 알림을 유실하는 것보다 초과
+   허용이 낫다 — 뒤에 DB 쓰기 말고는 비싼 작업이 없다. (AI 예산 판정과 반대 방향인데,
+   그쪽은 돈이 나가고 이쪽은 유저 데이터가 사라지기 때문이다.)
+4. **원본 payload 를 통째로 저장한다.** 유저마다 Pine Script 가 달라 `symbol`/`action` 만
+   강제하고, 우리가 모르는 필드도 `raw_payload_json` 에 남겨 나중에 꺼낼 수 있게 한다.
+5. `symbol` 은 대문자 정규화 + 20자로 자른다(`VARCHAR(20)`), 본문은 16KB 상한.
+
+#### 배포 시 주의
+
+**nginx 설정 변경이 필요하다** — `deploy/nginx/*.conf` 에 `/webhook/tv/` → `127.0.0.1:8100`
+proxy_pass 를 추가해 뒀지만, 서버의 실제 nginx 파일은 배포 자동화 대상이 아니다.
+DB 마이그레이션과 같이 SSH 로 직접 반영해야 유저 URL 이 외부에서 도달한다.
+엔진은 `127.0.0.1` 에만 바인딩하므로 nginx 를 거치지 않으면 외부 접근이 불가능하다.
+
 ## Step 0 — DB 마이그레이션 (신규, 착수 전 필수) — **완료 2026-09-02**
 
 기존 `database/init.sql`(v1 DDL)이 이미 있으므로, 전체 재작성 대신 마이그레이션 스크립트를 추가한다.
@@ -251,8 +345,8 @@ AI 20/Risk 15)이 필요하므로 `prompt.md` §3.3 개정이 선행되어야 �
 | 9/2 (수) | ~~Step 1-b — Bybit/Coinbase 추가 + 지표 4종 + 글로벌 가중 평균~~ 완료 (9/3 예정분 선행) |
 | 9/3 (목) | ~~Step 2-a — Consensus 계산 + RuleEngine 재작성~~ 완료 |
 | 9/4 (금) | ~~Step 2-b — OpenAI 연동 + `ai_signals` 저장/publish~~ 완료 (9/3 선행) |
-| 9/5 (토) | Step 3-a — 유저 웹훅 발급/재발급 API (PHP) |
-| 9/6 (일) | Step 3-b — 멀티테넌트 웹훅 수신 엔드포인트 (Python) + 유저 격리 테스트 |
+| 9/5 (토) | ~~Step 3-a — 유저 웹훅 발급/재발급 API (PHP)~~ 완료 (9/3 선행) |
+| 9/6 (일) | ~~Step 3-b — 멀티테넌트 웹훅 수신 엔드포인트 (Python) + 유저 격리 테스트~~ 완료 (9/3 선행) |
 | 9/7 (월) | Step 4-a — 백테스팅 엔진(신호검증용) |
 | 9/8 (화) | Step 4-b — 백테스팅 엔진(업비트 실전용, 수수료/슬리피지) |
 | 9/9 (수) | Step 5 — 실거래 안전장치·매매 실행(업비트 전용) |

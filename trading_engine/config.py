@@ -54,6 +54,15 @@ class Settings:
     ai_seed_calls_per_symbol: int = int(os.getenv("AI_SEED_CALLS_PER_SYMBOL", "5"))
     # 조회자 표시의 수명(초). 대시보드가 이 주기보다 자주 갱신해야 "보고 있다"가 유지된다.
     ai_viewer_ttl_sec: int = int(os.getenv("AI_VIEWER_TTL_SEC", "600"))
+    # 트레이딩뷰 웹훅 수신 (Step 3-b). 0 이나 빈 host 면 서버를 띄우지 않는다 —
+    # 이 기능을 꺼도 Step 1·2 수집·신호는 그대로 돌아야 한다.
+    webhook_enabled: bool = os.getenv("WEBHOOK_ENABLED", "1").strip() not in ("0", "false", "")
+    webhook_host: str = os.getenv("WEBHOOK_HOST", "127.0.0.1")
+    webhook_port: int = int(os.getenv("WEBHOOK_PORT", "8100"))
+    # 토큰 하나가 분당 보낼 수 있는 요청 수.
+    webhook_rate_per_min: int = int(os.getenv("WEBHOOK_RATE_PER_MIN", "60"))
+    # 수신 시각 기준 이 시간 안의 같은 심볼 ai_signals 만 참고 연결한다(분).
+    webhook_link_window_min: int = int(os.getenv("WEBHOOK_LINK_WINDOW_MIN", "15"))
     # 뉴스 수집 주기(초). RSS 는 분 단위로도 충분하고, 너무 잦으면 매체에 실례다.
     news_poll_sec: int = int(os.getenv("NEWS_POLL_SEC", "300"))
     fred_api_key: str | None = os.getenv("FRED_API_KEY") or None

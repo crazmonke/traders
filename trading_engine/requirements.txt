@@ -4,6 +4,9 @@ aiohttp==3.14.3
 pandas>=2.2.2
 pandas-ta==0.4.71b0
 redis==5.0.4
+# 유저별 트레이딩뷰 웹훅 수신 (Step 3-b). 엔진이 처음으로 포트를 여는 지점이다.
+fastapi==0.115.6
+uvicorn==0.34.0
 PyMySQL==1.1.1
 SQLAlchemy==2.0.30
 openai==3.7.0
@@ -13,3 +16,5 @@ tenacity==8.4.2
 apscheduler==3.10.4
 pytest==8.2.2
 pytest-asyncio==0.23.7
+# FastAPI TestClient 가 요구한다 (테스트 전용이지만 requirements 를 나누지 않는 관행을 따른다)
+httpx==0.28.1

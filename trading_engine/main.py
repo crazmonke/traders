@@ -1,6 +1,8 @@
 """Trading Engine 엔트리포인트.
 
-현재 단계: Step 2 — 수집·지표(Step 1) → 거래소 간 합의·룰 엔진(2-a) → AI 분석·저장·publish(2-b).
+현재 단계: Step 3-b — 수집·지표(Step 1) → 합의·룰 엔진(2-a) → AI 분석·저장·publish(2-b)
+에 유저별 트레이딩뷰 웹훅 수신(3-b)이 더해진다. 웹훅은 수집과 같은 이벤트 루프에서
+독립 태스크로 돌고, 꺼도(WEBHOOK_ENABLED=0) 수집·신호는 그대로 동작한다.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import signal
 
 from trading_engine.config import settings
 from trading_engine.external.news import collector as news_collector
+from trading_engine.external.tradingview import receiver as webhook_receiver
 from trading_engine.indicators.calculator import Indicators
 from trading_engine.indicators.engine import IndicatorEngine
 from trading_engine.market.exchange_feed import ExchangeFeed
@@ -105,6 +108,18 @@ async def run() -> None:
             loop.add_signal_handler(sig, stop_all)
 
     tasks = [feed.run() for feed in feeds]
+
+    # 유저별 트레이딩뷰 웹훅 수신(Step 3-b). PRO 부가 기능이라 꺼도 나머지는 돌아야 한다.
+    if settings.webhook_enabled:
+        tasks.append(webhook_receiver.serve(webhook_receiver.create_app(store)))
+        log.info(
+            "웹훅 수신 대기 %s:%s (분당 %s회 제한)",
+            settings.webhook_host,
+            settings.webhook_port,
+            settings.webhook_rate_per_min,
+        )
+    else:
+        log.info("웹훅 수신 비활성 (WEBHOOK_ENABLED=0)")
 
     # 뉴스 아카이브(Step 11-a). 신호 점수에는 영향을 주지 않는다.
     # 수집이 실패해도 예외를 밖으로 내지 않으므로 시세 수집을 멈추지 않는다.
