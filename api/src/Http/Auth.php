@@ -90,9 +90,10 @@ final class Auth
 
         $this->audit()->record($userId, AuditRepository::REGISTER);
 
+        $user = $this->users()->find($userId);
         Response::success([
-            'user' => $this->users()->find($userId),
-            'plan' => $this->users()->planFor($userId),
+            'user' => $user,
+            'plan' => $this->users()->planForUser($user),
             'token' => Jwt::issue($userId),
         ], 201);
     }
@@ -117,9 +118,12 @@ final class Auth
         $userId = (int) $credentials['id'];
         $this->audit()->record($userId, AuditRepository::LOGIN);
 
+        $user = $this->users()->find($userId);
         Response::success([
-            'user' => $this->users()->find($userId),
-            'plan' => $this->users()->planFor($userId),
+            'user' => $user,
+            // Guard 와 같은 함수를 쓴다. 각자 계산하면 로그인 직후와 새로고침 후의
+            // 등급이 달라진다 (실제로 관리자가 FREE 로 표시되던 버그).
+            'plan' => $this->users()->planForUser($user),
             'token' => Jwt::issue($userId),
         ]);
     }

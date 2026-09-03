@@ -40,11 +40,15 @@ final class AdminRepository
         $stmt->execute();
 
         return array_map(static function (array $row): array {
-            $row['plan'] = Plan::fromSubscription([
-                'plan' => $row['plan'],
-                'status' => $row['status'],
-                'ends_at' => $row['ends_at'],
-            ]);
+            // 관리자는 항상 PRO 로 본다 — `UserRepository::planForUser()` 와 같은 규칙이다.
+            // 여기서 `Plan::fromSubscription()` 만 쓰면 관리자가 목록에서만 FREE 로 보인다.
+            $row['plan'] = ($row['role'] ?? 'user') === 'admin'
+                ? Plan::PRO
+                : Plan::fromSubscription([
+                    'plan' => $row['plan'],
+                    'status' => $row['status'],
+                    'ends_at' => $row['ends_at'],
+                ]);
             unset($row['status']);
             return $row;
         }, $stmt->fetchAll(\PDO::FETCH_ASSOC));
