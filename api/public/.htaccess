@@ -2,8 +2,22 @@
 # vhost가 AllowOverride All 이므로 이 파일이 적용된다.
 # 저장소로 관리되므로 배포하면 서버에 그대로 반영된다.
 
+# Authorization 헤더를 PHP 에 전달한다.
+#
+# **Apache 는 기본적으로 이 헤더를 PHP 에 넘기지 않는다.** 그래서 로그인은 되지만
+# (헤더가 필요 없다) 그 뒤 인증이 필요한 모든 요청이 401 이 되고, 프런트가 401 에서
+# 자동 로그아웃하므로 "메뉴만 누르면 로그아웃"으로 보인다. 2026-09-03 운영에서 실제로 겪었다.
+# 로컬 PHP 내장 서버는 헤더를 그대로 넘겨서 이 문제가 재현되지 않는다.
+<IfModule mod_setenvif.c>
+    SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+</IfModule>
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
+
+    # mod_setenvif 가 없는 환경을 위한 이중 안전장치.
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
     # 실제로 존재하는 파일/디렉토리는 그대로 서빙한다.
     # (정적 페이지, 이미지, CSS, JS 등)

@@ -125,13 +125,30 @@ final class Jwt
         return $matches[1];
     }
 
-    /** 현재 요청의 Authorization 헤더. */
+    /**
+     * 현재 요청의 Authorization 헤더.
+     *
+     * **웹서버가 이 헤더를 PHP 에 넘겨준다고 가정하면 안 된다.** Apache 는 기본적으로
+     * 넘기지 않아서, 로그인만 되고 이후 인증 요청이 전부 401 이 된다(2026-09-03 운영 사고).
+     * `.htaccess` 에서 넘기도록 설정하되, 서버 설정 하나에 인증 전체가 걸리지 않도록
+     * 여기서도 `apache_request_headers()` 로 한 번 더 찾는다.
+     */
     public static function requestHeader(): ?string
     {
-        $header = $_SERVER['HTTP_AUTHORIZATION']
-            ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
-            ?? null;
+        foreach (['HTTP_AUTHORIZATION', 'REDIRECT_HTTP_AUTHORIZATION'] as $key) {
+            if (isset($_SERVER[$key]) && is_string($_SERVER[$key]) && $_SERVER[$key] !== '') {
+                return $_SERVER[$key];
+            }
+        }
 
-        return is_string($header) ? $header : null;
+        if (function_exists('apache_request_headers')) {
+            foreach (apache_request_headers() as $name => $value) {
+                if (strcasecmp($name, 'Authorization') === 0 && is_string($value)) {
+                    return $value;
+                }
+            }
+        }
+
+        return null;
     }
 }
