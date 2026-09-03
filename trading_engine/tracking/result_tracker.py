@@ -171,11 +171,22 @@ def forward_bars(
 
 
 def evaluate(
-    item: PendingSignal, series: Sequence[Mapping[str, Any]]
+    item: PendingSignal,
+    series: Sequence[Mapping[str, Any]],
+    timeframe: str = CANDLE_TIMEFRAME,
 ) -> labeling.Label | None:
-    """한 건을 판정한다. 봉이 모자라면 None — 다음 주기에 다시 시도한다."""
+    """한 건을 판정한다. 봉이 모자라거나 구멍이 있으면 None — 다음 주기에 다시 시도한다."""
     bars = forward_bars(series, item.created_ts_ms)
     if not bars:
+        return None
+
+    candle_ms = _candle_minutes(timeframe) * MINUTE_MS
+
+    # 신호 직후 봉이 없으면 판정하지 않는다. `labeling` 은 시간 제한을 `bars[0]` 기준으로
+    # 재므로, 첫 봉이 신호보다 한참 뒤면 **엉뚱한 구간을 그 horizon 으로 재게 된다**
+    # (예: 신호 3시간 뒤부터 시작하는 봉으로 "1시간 후" 를 판정).
+    # 거래소 장애나 수집 구멍에서 실제로 생길 수 있다.
+    if int(bars[0]["ts"]) - item.created_ts_ms > candle_ms:
         return None
 
     # 시간 제한을 다 덮을 만큼 봉이 있는지. 모자란 채로 판정하면 아직 닿을 수 있는
@@ -255,7 +266,7 @@ async def run_once(timeframe: str = CANDLE_TIMEFRAME) -> int:
 
         pending_again = 0
         for item in items:
-            label = evaluate(item, series)
+            label = evaluate(item, series, timeframe)
             if label is None:
                 pending_again += 1
                 continue

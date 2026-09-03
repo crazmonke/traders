@@ -266,3 +266,21 @@ async def test_skips_the_cycle_when_another_instance_is_running():
 
     # DB 를 부르지 않고 바로 0 을 돌려줘야 한다.
     assert await tracker.run_once_locked(store, ttl=60) == 0
+
+
+def test_not_evaluated_when_the_first_bar_is_far_after_the_signal():
+    """수집 구멍이 있으면 `labeling` 이 엉뚱한 구간을 그 horizon 으로 잰다.
+
+    시간 제한은 `bars[0]` 기준으로 재므로, 첫 봉이 신호보다 한참 뒤면
+    "신호 3시간 뒤부터의 1시간" 을 "신호 후 1시간" 으로 기록하게 된다.
+    """
+    gapped = [bar(m, 101, 99, close=100) for m in range(180, 250, 5)]
+
+    assert tracker.evaluate(signal(horizon="1h", created_minute=0), gapped) is None
+
+
+def test_evaluated_when_the_first_bar_is_within_one_candle():
+    """정상 상태 — 신호 직후 봉부터 이어진다."""
+    normal = [bar(m, 101, 99, close=100) for m in range(5, 75, 5)]
+
+    assert tracker.evaluate(signal(horizon="1h", created_minute=0), normal) is not None
