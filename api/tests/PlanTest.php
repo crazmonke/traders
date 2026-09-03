@@ -74,7 +74,8 @@ final class PlanTest extends TestCase
 
     public function testHistoryWindowByPlan(): void
     {
-        self::assertSame(0, Plan::historyDays(Plan::FREE));
+        // FREE 가 0 이면 지연 창만 남아 신호가 거의 안 보인다. 하루치는 열어 준다.
+        self::assertSame(1, Plan::historyDays(Plan::FREE));
         self::assertSame(7, Plan::historyDays(Plan::BASIC));
         self::assertNull(Plan::historyDays(Plan::PRO));
     }

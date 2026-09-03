@@ -1,0 +1,264 @@
+/*
+ * Traders 대시보드 — 다크 톤, 시인성 우선.
+ *
+ * 순흑(#000)을 쓰지 않는다. 대비가 과해 숫자를 오래 보기 피로하고, 그림자·경계선이
+ * 표현되지 않아 정보 층위가 무너진다. 짙은 남색 바닥에 고대비 텍스트를 얹는다.
+ *
+ * 상승/하락 색은 --up/--down 토큰으로만 쓴다. 로케일에 따라 뒤집히기 때문이다
+ * (한국·일본은 빨강=상승, 서구는 초록=상승). 값 자체를 하드코딩하면 절반의 유저가
+ * 신호를 정반대로 읽는다. 색각 이상도 있으므로 색과 함께 ▲▼ 기호를 반드시 붙인다.
+ */
+
+:root {
+    --bg: #0b1020;
+    --surface: #141b2e;
+    --surface-2: #1b2439;
+    --border: #26314c;
+    --text: #e9edf7;
+    --muted: #93a0bd;
+    --accent: #5b8dff;
+    --accent-soft: rgba(91, 141, 255, 0.14);
+    --warn: #f0b429;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+    /* 기본은 한국 관례(빨강=상승). data-locale 로 뒤집는다. */
+    --up: #ff5566;
+    --down: #4d8dff;
+}
+
+/* 서구권은 초록=상승 / 빨강=하락 */
+html[data-locale="en"] {
+    --up: #26c281;
+    --down: #ff5566;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo",
+        "Noto Sans KR", sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* --- 레이아웃 ------------------------------------------------------------ */
+
+.topbar {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 0 24px;
+    height: 56px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.brand {
+    font-weight: 700;
+    font-size: 18px;
+    letter-spacing: -0.3px;
+    color: var(--text);
+}
+.brand span { color: var(--accent); }
+
+.nav { display: flex; gap: 4px; flex: 1; }
+.nav a {
+    padding: 6px 12px;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 14px;
+}
+.nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+.nav a.on { background: var(--accent-soft); color: var(--accent); }
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: 24px; }
+
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.4px; }
+h2 { font-size: 16px; margin: 28px 0 12px; }
+.sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+
+/* --- 카드 ---------------------------------------------------------------- */
+
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+}
+
+.card .sym { font-weight: 700; font-size: 15px; letter-spacing: 0.3px; }
+.card .price { font-family: var(--mono); font-size: 20px; margin: 6px 0 2px; }
+.card .meta { color: var(--muted); font-size: 12px; }
+
+/* --- 표 ------------------------------------------------------------------ */
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; letter-spacing: 0.4px; }
+tbody tr:hover { background: var(--surface-2); cursor: pointer; }
+td.num, th.num { text-align: right; font-family: var(--mono); }
+
+.table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+}
+
+/* --- 신호 배지 ------------------------------------------------------------ */
+
+.sig {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+/* 색만으로 구분하지 않는다 - ▲▼ 기호를 JS 가 함께 넣는다. */
+.sig.buy { background: color-mix(in srgb, var(--up) 18%, transparent); color: var(--up); }
+.sig.sell { background: color-mix(in srgb, var(--down) 18%, transparent); color: var(--down); }
+.sig.hold { background: var(--surface-2); color: var(--muted); }
+
+.up { color: var(--up); }
+.down { color: var(--down); }
+
+/* --- 잠금 (등급 제한) ------------------------------------------------------ */
+
+/*
+ * 잠긴 항목은 숨기지 않는다. 무엇을 못 보고 있는지 알아야 업그레이드 유인이 생긴다.
+ * 값 자리에 자물쇠를 놓고 무엇이 필요한지 알려준다.
+ */
+.lock {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--muted);
+    font-size: 12px;
+    background: var(--surface-2);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+.lock::before { content: "🔒"; font-size: 10px; }
+
+/*
+ * "아직 값이 없다"는 잠금과 다르다. 같은 기호로 그리면 유저가 "돈 내면 보이나?"로
+ * 오해한다. 자물쇠 없이 점선 테두리만 쓴다.
+ */
+.pending {
+    display: inline-flex;
+    align-items: center;
+    color: var(--muted);
+    font-size: 12px;
+    background: transparent;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+
+.plan-tag {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    letter-spacing: 0.5px;
+}
+
+/* --- 점수 막대 ------------------------------------------------------------ */
+
+.bars { display: grid; gap: 8px; margin: 4px 0 0; }
+.bar-row { display: grid; grid-template-columns: 92px 1fr 48px; align-items: center; gap: 10px; }
+.bar-row .label { color: var(--muted); font-size: 12px; }
+.bar-row .val { font-family: var(--mono); font-size: 13px; text-align: right; }
+.bar {
+    height: 6px;
+    background: var(--surface-2);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+/* --- 폼 ------------------------------------------------------------------ */
+
+.auth { max-width: 380px; margin: 12vh auto; padding: 0 20px; }
+.field { margin-bottom: 14px; }
+label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+
+input, select {
+    width: 100%;
+    padding: 11px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+button {
+    padding: 11px 16px;
+    background: var(--accent);
+    border: 0;
+    border-radius: 8px;
+    color: #08122b;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    font-family: inherit;
+}
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+button.ghost:hover { color: var(--text); }
+
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+
+.msg { padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
+.msg.err { background: color-mix(in srgb, #ff5566 16%, transparent); color: #ffb3bb; }
+.msg.ok { background: var(--accent-soft); color: var(--accent); }
+
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.tabs button { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+.tabs button.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+
+.empty { color: var(--muted); padding: 36px 12px; text-align: center; font-size: 14px; }
+
+/* --- 법적 고지 (prompt.md §7-3) ------------------------------------------- */
+
+/*
+ * 모든 화면 하단에 노출한다. 언어별로 검수된 고정 문구이며 기계번역 대상이 아니다.
+ * 눈에 띄지 않게 하되 읽을 수는 있어야 하므로 대비를 너무 낮추지 않는다.
+ */
+.legal {
+    margin-top: 40px;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+@media (max-width: 640px) {
+    .wrap { padding: 16px; }
+    .topbar { gap: 12px; padding: 0 14px; }
+    .nav a { padding: 6px 8px; }
+    .bar-row { grid-template-columns: 76px 1fr 44px; }
+}

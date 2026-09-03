@@ -23,8 +23,14 @@ final class Plan
     /** FREE 에게 적용할 신호 지연(분). 실시간성이 유료 가치다. */
     public const FREE_DELAY_MINUTES = 15;
 
-    /** 등급별 신호 이력 조회 가능 기간(일). null 은 무제한. */
-    public const HISTORY_DAYS = [self::FREE => 0, self::BASIC => 7, self::PRO => null];
+    /**
+     * 등급별 신호 이력 조회 가능 기간(일). null 은 무제한, 0 은 이력 없음.
+     *
+     * FREE 가 0 이면 지연 창(15분) 언저리만 남아 **신호가 거의 안 보인다** — 실측으로
+     * 15~60분 사이의 신호 하나만 걸렸다. §17-1 의 "히스토리 없음"은 **적중률 이력**을
+     * 뜻하지 신호 목록 자체를 막으라는 것이 아니다. FREE 도 하루치는 봐야 서비스가 된다.
+     */
+    public const HISTORY_DAYS = [self::FREE => 1, self::BASIC => 7, self::PRO => null];
 
     /**
      * 구독 행에서 등급을 뽑는다. 만료·해지는 FREE 로 떨어진다.
