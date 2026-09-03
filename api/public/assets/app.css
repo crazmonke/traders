@@ -133,6 +133,16 @@ td.num, th.num { text-align: right; font-family: var(--mono); }
 .sig.sell { background: color-mix(in srgb, var(--down) 18%, transparent); color: var(--down); }
 .sig.hold { background: var(--surface-2); color: var(--muted); }
 
+/*
+ * 시스템 상태(정상/중단)에 --up/--down 을 쓰면 안 된다. 그 토큰은 **시장 방향**이고
+ * 로케일에 따라 뒤집히기 때문에, en 으로 바꾸면 "정상"과 "중단" 색이 서로 바뀐다.
+ * 상태는 로케일과 무관하므로 고정색을 따로 둔다.
+ */
+.status { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+    border-radius: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.status.ok { background: rgba(38, 194, 129, 0.16); color: #4bd6a0; }
+.status.bad { background: rgba(240, 180, 41, 0.16); color: var(--warn); }
+
 .up { color: var(--up); }
 .down { color: var(--down); }
 

@@ -147,11 +147,15 @@ const LEGAL = `본 서비스에서 제공하는 분석 결과 및 AI 신호는 �
 const app = () => document.getElementById('app');
 
 function shell(inner, active) {
-    const nav = [
+    const items = [
         ['#/', '대시보드'],
         ['#/signals', '신호'],
         ['#/backtest', '백테스트'],
-    ].map(([href, label]) =>
+    ];
+    // 관리자 메뉴는 관리자에게만 그린다. 차단 자체는 서버가 404 로 한다.
+    if (state.user?.role === 'admin') items.push(['#/admin', '관리']);
+
+    const nav = items.map(([href, label]) =>
         `<a href="${href}" class="${active === href ? 'on' : ''}">${label}</a>`
     ).join('');
 
@@ -275,18 +279,46 @@ function signalTable(rows) {
 
 async function viewSignals() {
     app().innerHTML = shell('<p class="sub">불러오는 중…</p>', '#/signals');
-    const data = await call('/signals/latest?limit=50');
+
+    const symbol = new URLSearchParams(location.hash.split('?')[1] || '').get('symbol');
+    const query = symbol ? `&symbol=${encodeURIComponent(symbol)}` : '';
+    const data = await call(`/signals/latest?limit=50${query}`);
 
     const notice = state.plan === 'free'
         ? `<div class="msg ok">FREE 등급은 신호가 15분 지연되고 근거가 일부 가려집니다.
            실시간과 전체 근거는 BASIC 이상에서 볼 수 있습니다.</div>`
         : '';
 
+    // 심볼을 고르면 그 심볼의 점수 추이를 그린다. 여러 심볼이 섞인 추이는 의미가 없다.
+    const symbols = [...new Set(data.signals.map((s) => s.symbol))].sort();
+    const chips = symbols.map((s) =>
+        `<button class="${symbol === s ? 'on' : ''}" data-symbol="${esc(s)}">${esc(s)}</button>`
+    ).join('');
+
+    const chart = symbol
+        ? `<h2>${esc(symbol)} 점수 추이</h2><div class="card">${sparkline(
+            data.signals.slice().reverse().map((s) => ({
+                value: Number(s.final_score), label: when(s.created_at),
+            })))}</div>`
+        : '';
+
     app().innerHTML = shell(`
         <h1>신호</h1>
         <p class="sub">최신순 · ${data.signals.length}건</p>
         ${notice}
+        <div class="tabs">
+            <button class="${symbol ? '' : 'on'}" data-symbol="">전체</button>${chips}
+        </div>
+        ${chart}
+        ${symbol ? '<h2>내역</h2>' : ''}
         ${signalTable(data.signals)}`, '#/signals');
+
+    document.querySelectorAll('.tabs button[data-symbol]').forEach((btn) => {
+        btn.onclick = () => {
+            location.hash = btn.dataset.symbol ? `#/signals?symbol=${btn.dataset.symbol}` : '#/signals';
+            viewSignals();
+        };
+    });
 }
 
 async function viewSignalDetail(id) {
@@ -398,6 +430,198 @@ async function viewBacktest() {
     await render();
 }
 
+/**
+ * 점수 추이 스파크라인. 라이브러리를 쓰지 않고 인라인 SVG 로 그린다.
+ *
+ * 차트 하나에 번들러와 의존성을 들이지 않는다(9-a 의 "빌드 도구 없음"과 같은 이유).
+ * 값이 2개 미만이면 선이 되지 않으므로 그리지 않는다.
+ */
+function sparkline(points, { width = 640, height = 120 } = {}) {
+    if (!points || points.length < 2) {
+        return '<div class="empty">추이를 그릴 만큼 신호가 쌓이지 않았습니다.</div>';
+    }
+    const values = points.map((p) => p.value);
+    const min = Math.min(...values, 0);
+    const max = Math.max(...values, 100);
+    const span = max - min || 1;
+    const stepX = width / (points.length - 1);
+
+    const coords = points.map((p, i) => [
+        i * stepX,
+        height - ((p.value - min) / span) * height,
+    ]);
+    const line = coords.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+    const area = `${line} L${width},${height} L0,${height} Z`;
+
+    // 진입 기준선(80). 점수가 이 위로 올라가야 매수 신호가 된다.
+    const thresholdY = height - ((80 - min) / span) * height;
+    const dots = coords.map(([x, y], i) =>
+        `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5"
+                 fill="var(--accent)"><title>${esc(points[i].label)}: ${points[i].value}</title></circle>`
+    ).join('');
+
+    return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"
+                 style="width:100%;height:${height}px;overflow:visible" role="img"
+                 aria-label="최종 점수 추이">
+        <line x1="0" y1="${thresholdY.toFixed(1)}" x2="${width}" y2="${thresholdY.toFixed(1)}"
+              stroke="var(--border)" stroke-dasharray="4 4"/>
+        <path d="${area}" fill="var(--accent-soft)"/>
+        <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2"
+              stroke-linejoin="round"/>
+        ${dots}
+    </svg>
+    <div class="row" style="justify-content:space-between;color:var(--muted);font-size:12px">
+        <span>${esc(points[0].label)}</span>
+        <span>진입 기준선 80 (점선)</span>
+        <span>${esc(points[points.length - 1].label)}</span>
+    </div>`;
+}
+
+/* --- 관리자 -------------------------------------------------------------- */
+
+async function viewAdmin() {
+    app().innerHTML = shell('<p class="sub">불러오는 중…</p>', '#/admin');
+
+    const [users, budget, system, safety] = await Promise.all([
+        call('/admin/users'),
+        call('/admin/ai-budget'),
+        call('/admin/system'),
+        call('/safety/state'),
+    ]);
+
+    const c = system.system.counts;
+    const summary = [
+        ['유저', c.users], ['신호(전체)', c.signals], ['신호(24시간)', c.signals_24h],
+        ['백테스트', c.backtests], ['웹훅 수신', c.webhook_signals],
+    ].map(([label, value]) => `<div class="card">
+        <div class="meta">${label}</div><div class="price">${num(value, 0)}</div></div>`).join('');
+
+    // 상태 배지는 `.status` 를 쓴다. `.sig` 는 시장 방향 색이라 로케일에 따라 뒤집힌다.
+    const engine = system.system.engine_alive
+        ? `<span class="status ok">● 수집 중</span> ${system.system.symbols.length}개 심볼`
+        : `<span class="status bad">● 중단</span> 시세 캐시가 비어 있습니다`;
+
+    const modeButtons = budget.ai_budget.modes.map((m) => `
+        <button class="${budget.ai_budget.mode === m ? 'on' : ''}" data-mode="${m}">${m}</button>`
+    ).join('');
+
+    const userRows = users.users.map((u) => `
+        <tr>
+            <td>#${u.id}</td>
+            <td>${esc(u.email)}</td>
+            <td>${esc(u.name)}</td>
+            <td>${u.role === 'admin' ? '<span class="plan-tag">ADMIN</span>' : ''}</td>
+            <td><span class="plan-tag">${esc(u.plan.toUpperCase())}</span></td>
+            <td>
+                <select data-user="${u.id}">
+                    ${['free', 'basic', 'pro'].map((p) =>
+                        `<option value="${p}" ${u.plan === p ? 'selected' : ''}>${p}</option>`).join('')}
+                </select>
+            </td>
+        </tr>`).join('');
+
+    app().innerHTML = shell(`
+        <h1>관리</h1>
+        <p class="sub">운영 현황과 비용·안전장치 제어</p>
+        <div class="grid">${summary}</div>
+
+        <h2>엔진</h2>
+        <div class="card">${engine}</div>
+
+        <h2>AI 호출 예산</h2>
+        <div class="card">
+            <p class="sub" style="margin-bottom:12px">
+                유저가 없는 동안 나가는 유일한 고정비입니다.
+                <strong>off</strong> 는 호출 0(룰 신호는 계속 나옴),
+                <strong>seed</strong> 는 심볼당 하루 5건(적중률 기록 유지),
+                <strong>full</strong> 은 게이트 통과 전부입니다.
+            </p>
+            <div class="tabs" id="modes">${modeButtons}</div>
+            <div class="meta">현재: <strong>${esc(budget.ai_budget.effective)}</strong>
+                · seed 슬롯 사용 중 ${budget.ai_budget.seed_slots_in_use}개
+                ${budget.ai_budget.mode === null
+                    ? '<br>재정의가 없어 엔진 <code>.env</code> 기본값으로 동작합니다.' : ''}</div>
+            <div id="budgetMsg"></div>
+        </div>
+
+        <h2>실거래 안전장치</h2>
+        <div class="card">
+            <div class="row" style="gap:20px">
+                <div><div class="meta">모드</div>
+                    <div class="price" style="font-size:18px">${esc(safety.safety.mode)}</div></div>
+                <div><div class="meta">Kill switch</div>
+                    <div class="price" style="font-size:18px">
+                        ${safety.safety.kill_switch_active
+                            ? '<span class="status bad">● 작동 중</span>' : '○ 해제'}
+                    </div></div>
+                <div><div class="meta">일일 손실 한도</div>
+                    <div class="price" style="font-size:18px">${num(safety.safety.daily_loss_limit_pct)}%</div></div>
+                <div><div class="meta">단일 주문 한도</div>
+                    <div class="price" style="font-size:18px">₩${price(safety.safety.max_position_size_krw)}</div></div>
+            </div>
+            <div class="row" style="margin-top:14px">
+                <button id="toggleMode" class="ghost">
+                    ${safety.safety.mode === 'PAPER' ? 'LIVE 로 전환' : 'PAPER 로 되돌리기'}</button>
+                <button id="toggleKill" class="ghost">
+                    ${safety.safety.kill_switch_active ? 'Kill switch 해제' : 'Kill switch 작동'}</button>
+            </div>
+            <div class="meta" style="margin-top:10px">
+                매매 내역(보유 코인·손익·잔고)은 매매 엔진이 붙는 Step 5 이후에 표시됩니다.
+            </div>
+            <div id="safetyMsg"></div>
+        </div>
+
+        <h2>유저</h2>
+        <div class="table-wrap"><table>
+            <thead><tr><th>ID</th><th>이메일</th><th>이름</th><th>역할</th>
+                <th>현재 등급</th><th>등급 변경</th></tr></thead>
+            <tbody>${userRows}</tbody></table></div>
+        <p class="sub" style="margin-top:10px">
+            역할(관리자) 변경은 화면에서 하지 않습니다 —
+            승격 API 가 존재하는 것 자체가 권한 상승 취약점이라 CLI 로만 처리합니다.</p>`, '#/admin');
+
+    document.querySelectorAll('#modes button').forEach((btn) => {
+        btn.onclick = async () => {
+            try {
+                await call('/admin/ai-budget', { method: 'PATCH', body: { mode: btn.dataset.mode } });
+                viewAdmin();
+            } catch (error) {
+                document.getElementById('budgetMsg').innerHTML =
+                    `<div class="msg err">${esc(error.message)}</div>`;
+            }
+        };
+    });
+
+    document.querySelectorAll('select[data-user]').forEach((sel) => {
+        sel.onchange = async () => {
+            try {
+                await call(`/admin/users/${sel.dataset.user}`, {
+                    method: 'PATCH', body: { plan: sel.value, days: 30 },
+                });
+                viewAdmin();
+            } catch (error) { alert(error.message); }
+        };
+    });
+
+    const patchSafety = async (body) => {
+        try {
+            await call('/safety/state', { method: 'PATCH', body });
+            viewAdmin();
+        } catch (error) {
+            document.getElementById('safetyMsg').innerHTML =
+                `<div class="msg err">${esc(error.message)}</div>`;
+        }
+    };
+    document.getElementById('toggleMode').onclick = () => {
+        const next = safety.safety.mode === 'PAPER' ? 'LIVE' : 'PAPER';
+        // LIVE 전환은 실제 돈이 움직이기 시작하는 지점이다. 한 번 되묻는다.
+        if (next === 'LIVE' && !confirm('실거래(LIVE)로 전환합니다. 실제 주문이 발생합니다. 계속할까요?')) return;
+        patchSafety({ mode: next });
+    };
+    document.getElementById('toggleKill').onclick = () =>
+        patchSafety({ kill_switch_active: !safety.safety.kill_switch_active });
+}
+
 /* --- 라우팅 -------------------------------------------------------------- */
 
 async function route() {
@@ -426,6 +650,7 @@ async function route() {
         if (detail) return await viewSignalDetail(detail[1]);
         if (hash.startsWith('#/signals')) return await viewSignals();
         if (hash.startsWith('#/backtest')) return await viewBacktest();
+        if (hash.startsWith('#/admin')) return await viewAdmin();
         return await viewDashboard();
     } catch (error) {
         app().innerHTML = shell(

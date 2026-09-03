@@ -79,6 +79,7 @@ const WEBHOOK_ROUTE = '/api/v1/webhooks/tradingview';
 // 접두사 → 핸들러. 하위 경로(/{id}, /latest 등)가 있어 switch 앞에서 먼저 가른다.
 $prefixRoutes = [
     '/api/v1/auth'         => fn () => new App\Http\Auth(),
+    '/api/v1/admin'        => fn () => new App\Http\Admin(),
     WEBHOOK_ROUTE          => fn () => new App\Http\Webhooks(),
     '/api/v1/signals'      => fn () => new App\Http\Signals(),
     '/api/v1/market'       => fn () => new App\Http\Market(),

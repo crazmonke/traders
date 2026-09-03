@@ -76,10 +76,22 @@ final class Guard
         }
     }
 
-    /** 이 유저의 등급 (free/basic/pro). */
+    /**
+     * 이 유저의 등급 (free/basic/pro).
+     *
+     * **관리자는 항상 PRO 로 본다.** 운영자가 합의율·근거·전체 이력을 못 보면 서비스를
+     * 운영할 수 없다 — 유저 문의에 답하거나 신호가 이상한지 판단할 방법이 없어진다.
+     * 관리자는 CLI 로만 만들어지므로(`api/bin/make-admin.php`) 이 우회로 등급 결제를
+     * 건너뛸 방법은 없다.
+     */
     public function plan(): string
     {
-        return $this->users()->planFor((int) $this->user()['id']);
+        $user = $this->user();
+        if (($user['role'] ?? 'user') === 'admin') {
+            return Plan::PRO;
+        }
+
+        return $this->users()->planFor((int) $user['id']);
     }
 
     /** 등급이 모자라면 402 로 끝난다. 화면이 아니라 여기서 막아야 우회가 안 된다. */

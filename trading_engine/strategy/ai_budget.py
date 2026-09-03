@@ -17,6 +17,10 @@
 적중률은 "특정 종목·특정 시간대 한정 통계"라 셀링포인트로 쓸 수 없다(README §9).
 간격(24시간 ÷ N)으로 만들면 심볼과 시간대에 저절로 퍼진다.
 
+**모드는 런타임에 바뀐다.** 관리자 화면이 Redis `settings:ai_mode` 를 쓰면 다음 판정부터
+즉시 반영된다. `.env` 의 `AI_MODE` 는 그 키가 없을 때의 기본값일 뿐이다 — 환경변수만
+보면 끄려고 프로세스를 재시작해야 하는데, 비용이 새는 상황에서 재시작을 기다릴 수 없다.
+
 **조회자가 있으면 seed 모드에서도 full 처럼 동작한다.** 손님이 온 가게만 전등을 켜는
 것이 원래 목적이었다. 표시(`watch:{symbol}`)는 Step 6 API / Step 9 대시보드가
 `RedisStore.mark_viewer` 로 남긴다 — **지금은 아무도 쓰지 않아 항상 seed 로 동작한다.**
@@ -76,7 +80,13 @@ class AiBudget:
 
     @property
     def enabled(self) -> bool:
-        """off 모드면 Redis 조차 건드리지 않는다."""
+        """`.env` 기본값 기준. 런타임 전환은 `allow()` 안의 `current_mode()` 가 본다.
+
+        여기서 Redis 를 읽지 않는 이유는 이 값이 파이프라인의 "봉 차단 키를 쓸지"를
+        가르는 동기 판정이기 때문이다. off 로 시작한 서버를 관리자가 켜면 `allow()` 에서
+        걸러지고, on 으로 시작한 서버를 끄면 `allow()` 가 False 를 준다 — 어느 쪽이든
+        호출은 나가지 않는다.
+        """
         return self._mode != MODE_OFF
 
     @property
@@ -96,11 +106,26 @@ class AiBudget:
             f"(간격 {self.seed_interval_sec / 3600:.1f}시간), 조회 중인 심볼은 제한 없음"
         )
 
+    async def current_mode(self) -> str:
+        """지금 적용될 모드. Redis 설정이 있으면 그것이, 없으면 `.env` 기본값이 이긴다.
+
+        조회 실패 시 기본값으로 물러선다 — Redis 가 흔들린다고 예산 정책이 통째로
+        사라지면 안 된다.
+        """
+        try:
+            override = await self._store.load_ai_mode()
+        except Exception:
+            log.exception("AI 모드 설정 조회 실패 - 기본값(%s)을 쓴다", self._mode)
+            return self._mode
+
+        return resolve_mode(override) if override else self._mode
+
     async def allow(self, symbol: str) -> bool:
         """이 심볼에 지금 호출 한 건을 쓸 수 있는지. True 면 슬롯을 소비한 것이다."""
-        if self._mode == MODE_OFF:
+        mode = await self.current_mode()
+        if mode == MODE_OFF:
             return False
-        if self._mode == MODE_FULL:
+        if mode == MODE_FULL:
             return True
         if await self._has_viewer(symbol):
             log.debug("%s 조회 중 - seed 쿼터를 쓰지 않고 호출한다", symbol)

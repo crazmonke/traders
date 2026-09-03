@@ -19,6 +19,7 @@ v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
     ai:seed:{symbol}                    -> String(TTL)   # seed 모드 호출 간격 (Step 2)
     watch:{symbol}                      -> String(TTL)   # 이 심볼을 보고 있는 유저 (Step 6·9)
     webhook:rate:{token}:{minute}       -> String(TTL)   # 토큰별 수신 제한 (Step 3-b)
+    settings:ai_mode                    -> String        # 관리자가 바꾸는 AI 예산 모드 (Step 9-b)
     channel:signals                     -> Pub/Sub       # 확정된 신호 (Step 2)
 """
 
@@ -77,6 +78,10 @@ def ai_seed_key(symbol: str) -> str:
 
 def viewer_key(symbol: str) -> str:
     return f"watch:{symbol}"
+
+
+# 관리자 화면이 쓰는 런타임 설정. `.env` 는 기본값일 뿐이고, 이 키가 있으면 그것이 이긴다.
+AI_MODE_KEY = "settings:ai_mode"
 
 
 SIGNAL_CHANNEL = "channel:signals"
@@ -166,6 +171,15 @@ class RedisStore:
         return bool(
             await self._client.set(ai_call_key(symbol, timeframe), "1", ex=ttl, nx=True)
         )
+
+    async def load_ai_mode(self) -> str | None:
+        """관리자가 설정한 AI 예산 모드. 없으면 None(=`.env` 기본값을 쓴다)."""
+        value = await self._client.get(AI_MODE_KEY)
+        return value if isinstance(value, str) and value else None
+
+    async def save_ai_mode(self, mode: str) -> None:
+        """TTL 을 두지 않는다. 관리자가 끈 것은 다시 켤 때까지 유지돼야 한다."""
+        await self._client.set(AI_MODE_KEY, mode)
 
     async def claim_ai_seed(self, symbol: str, interval: int) -> bool:
         """seed 모드 호출 슬롯. `interval` 초에 한 번만 True 다.
