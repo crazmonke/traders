@@ -47,6 +47,13 @@ class Settings:
     db_name: str = os.getenv("DB_DATABASE", "ai_trading")
     db_user: str = os.getenv("DB_USERNAME", "ai_trading")
     db_password: str = os.getenv("DB_PASSWORD", "")
+    # AI 호출 예산 모드 — off | seed | full. 자세한 근거는 strategy/ai_budget.py.
+    # 기본값을 seed 로 둔다. 유저가 없는 동안 full 로 도는 것이 지금 유일한 고정비다.
+    ai_mode: str = os.getenv("AI_MODE", "seed").strip().lower() or "seed"
+    # seed 모드에서 심볼 하나에 허용할 하루 호출 수. 5 × 5심볼 = 25건/일.
+    ai_seed_calls_per_symbol: int = int(os.getenv("AI_SEED_CALLS_PER_SYMBOL", "5"))
+    # 조회자 표시의 수명(초). 대시보드가 이 주기보다 자주 갱신해야 "보고 있다"가 유지된다.
+    ai_viewer_ttl_sec: int = int(os.getenv("AI_VIEWER_TTL_SEC", "600"))
     # 뉴스 수집 주기(초). RSS 는 분 단위로도 충분하고, 너무 잦으면 매체에 실례다.
     news_poll_sec: int = int(os.getenv("NEWS_POLL_SEC", "300"))
     fred_api_key: str | None = os.getenv("FRED_API_KEY") or None

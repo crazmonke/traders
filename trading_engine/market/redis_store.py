@@ -14,6 +14,11 @@ v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
     global:{symbol}:price               -> String(JSON)  # 거래량 가중 평균
     global:{symbol}:indicators          -> String(JSON)
     consensus:{symbol}:{tf}             -> String(JSON)  # 거래소 간 합의·점수 (Step 2)
+    ai:called:{symbol}:{tf}             -> String(TTL)   # AI 중복 호출 차단 (Step 2)
+    ai:result:{symbol}:{tf}             -> String(JSON)  # 그 봉의 AI 분석 (재사용용)
+    ai:seed:{symbol}                    -> String(TTL)   # seed 모드 호출 간격 (Step 2)
+    watch:{symbol}                      -> String(TTL)   # 이 심볼을 보고 있는 유저 (Step 6·9)
+    channel:signals                     -> Pub/Sub       # 확정된 신호 (Step 2)
 """
 
 from __future__ import annotations
@@ -53,6 +58,27 @@ def global_key(symbol: str, kind: str) -> str:
 
 def consensus_key(symbol: str, timeframe: str = "5m") -> str:
     return f"consensus:{symbol}:{timeframe}"
+
+
+def ai_call_key(symbol: str, timeframe: str = "5m") -> str:
+    return f"ai:called:{symbol}:{timeframe}"
+
+
+def ai_result_key(symbol: str, timeframe: str = "5m") -> str:
+    return f"ai:result:{symbol}:{timeframe}"
+
+
+def ai_seed_key(symbol: str) -> str:
+    """seed 모드 호출 간격 키. 타임프레임을 넣지 않는다 — 예산은 돈이고, 5분봉과
+    15분봉이 각자 따로 쓰면 예산이 두 배가 된다."""
+    return f"ai:seed:{symbol}"
+
+
+def viewer_key(symbol: str) -> str:
+    return f"watch:{symbol}"
+
+
+SIGNAL_CHANNEL = "channel:signals"
 
 
 class RedisStore:
@@ -128,6 +154,57 @@ class RedisStore:
         """거래소 간 합의 결과. 지표와 같은 TTL 을 준다 — 지표가 낡으면 합의도 낡는다."""
         await self._set_json(
             consensus_key(symbol, timeframe), payload, ttl=self._indicator_ttl
+        )
+
+    async def claim_ai_call(self, symbol: str, timeframe: str, ttl: int) -> bool:
+        """AI 호출 슬롯을 선점한다. 이미 있으면 False — 그 주기에는 부르지 않는다.
+
+        `SET NX EX` 한 번으로 확인과 선점을 같이 한다. 조회 후 기록으로 나누면 두 심볼
+        평가가 겹칠 때 같은 봉에서 두 번 호출될 수 있다. (prompt.md v2 [Step 2] 요구사항 3)
+        """
+        return bool(
+            await self._client.set(ai_call_key(symbol, timeframe), "1", ex=ttl, nx=True)
+        )
+
+    async def claim_ai_seed(self, symbol: str, interval: int) -> bool:
+        """seed 모드 호출 슬롯. `interval` 초에 한 번만 True 다.
+
+        카운터가 아니라 간격으로 만든 이유는 `strategy/ai_budget.py` 주석에 있다.
+        """
+        return bool(
+            await self._client.set(ai_seed_key(symbol), "1", ex=interval, nx=True)
+        )
+
+    async def has_viewer(self, symbol: str) -> bool:
+        """이 심볼을 지금 보고 있는 유저가 있는지."""
+        return bool(await self._client.exists(viewer_key(symbol)))
+
+    async def mark_viewer(self, symbol: str, ttl: int) -> None:
+        """"이 심볼을 보고 있다"를 표시한다. Step 6 API / Step 9 대시보드가 호출한다.
+
+        엔진은 이 값을 읽기만 한다. 조회가 들어오는 쪽에서 갱신해야 하므로,
+        키 이름을 각자 만들지 않도록 여기에 둔다.
+        """
+        await self._client.set(viewer_key(symbol), "1", ex=ttl)
+
+    async def save_ai_analysis(
+        self, symbol: str, timeframe: str, payload: dict[str, Any], ttl: int
+    ) -> None:
+        """그 봉의 AI 분석. 차단 키와 같은 TTL 이라 둘이 함께 만료된다."""
+        await self._set_json(ai_result_key(symbol, timeframe), payload, ttl=ttl)
+
+    async def load_ai_analysis(
+        self, symbol: str, timeframe: str
+    ) -> dict[str, Any] | None:
+        raw = await self._client.get(ai_result_key(symbol, timeframe))
+        return json.loads(raw) if raw else None
+
+    async def publish_signal(self, payload: dict[str, Any]) -> int:
+        """확정된 신호를 `channel:signals` 로 publish. 반환값은 수신한 구독자 수."""
+        return int(
+            await self._client.publish(
+                SIGNAL_CHANNEL, json.dumps(payload, ensure_ascii=False)
+            )
         )
 
     async def save_indicators(self, market: str, payload: dict[str, Any]) -> None:
