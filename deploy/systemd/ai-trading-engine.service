@@ -24,6 +24,9 @@ WorkingDirectory=/var/www/traders
 ExecStart=/var/www/traders/trading_engine/venv/bin/python -m trading_engine.main
 # .env 는 config.py 가 python-dotenv 로 직접 읽는다. systemd EnvironmentFile 로
 # 이중 로딩하면 주석/따옴표 파싱 차이로 기동이 실패할 수 있어 쓰지 않는다.
+# 종료가 오래 걸리면 그만큼 수집이 비어 있는 시간이다. 코드가 SIGTERM 을 제대로
+# 처리하면 몇 초면 끝나고, 이 값은 그게 깨졌을 때의 상한이다(기본값 90초는 너무 길다).
+TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

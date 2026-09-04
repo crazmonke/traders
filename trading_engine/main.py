@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+from typing import Any
 
 from trading_engine.config import settings
 from trading_engine.backtest import worker as backtest_worker
@@ -27,6 +28,11 @@ from trading_engine.strategy.signal_pipeline import SignalPipeline
 from trading_engine.tracking import result_tracker
 
 log = logging.getLogger(__name__)
+
+# 종료 신호를 받고 수집이 스스로 정리할 때까지 주는 시간(초).
+# 이 시간이 지나면 남은 무한 루프 태스크를 취소한다. systemd 의 TimeoutStopSec 보다
+# 충분히 작아야 SIGKILL 로 죽지 않는다.
+SHUTDOWN_GRACE_SEC = 5.0
 
 
 def setup_logging() -> None:
@@ -100,16 +106,7 @@ async def run() -> None:
         ", ".join(settings.symbols),
     )
 
-    def stop_all() -> None:
-        for feed in feeds:
-            feed.stop()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop_all)
-
-    tasks = [feed.run() for feed in feeds]
+    tasks: list[Any] = [feed.run() for feed in feeds]
 
     # 유저별 트레이딩뷰 웹훅 수신(Step 3-b). PRO 부가 기능이라 꺼도 나머지는 돌아야 한다.
     if settings.webhook_enabled:
@@ -146,9 +143,37 @@ async def run() -> None:
         tasks.append(result_tracker.run_forever(store))
         log.info("성과 추적 동거 실행 (TRACKER_IN_ENGINE=1, %d초 주기)", settings.tracker_interval_sec)
 
+    # 거래소별로 독립된 태스크다. 하나가 죽어도 나머지는 계속 수집한다.
+    running = asyncio.gather(*tasks)
+    loop = asyncio.get_running_loop()
+
+    def stop_all() -> None:
+        """SIGTERM/SIGINT 처리.
+
+        **수집만 멈추면 프로세스가 끝나지 않는다.** 뉴스·백테스트·추적은 `run_forever`
+        무한 루프라 `gather` 가 영영 끝나지 않고, systemd 가 90초를 기다린 뒤
+        SIGKILL 로 죽인다(2026-09-04 실측: 09:36:40 정지 요청 → 09:38:10 재기동).
+        **그 90초 동안 수집은 이미 멎어 있어 신호가 통째로 비었다.**
+
+        그래서 수집에 정리할 시간을 준 뒤 `gather` 를 취소한다. 곧바로 취소하면
+        거래소 클라이언트가 닫히기 전에 끊겨 소켓이 남는다(실측: Unclosed connector).
+        """
+        for feed in feeds:
+            feed.stop()
+        # 유예 뒤 취소. 수집이 먼저 끝나 있으면 취소는 남은 무한 루프만 깨운다.
+        # 조용한 마켓에 붙은 거래소는 `watch_*` 에서 대기 중이라 유예 안에 못 닫는다 —
+        # 종료 직전의 "Unclosed connector" 경고는 그것이고, 소켓은 프로세스가 끝나며
+        # OS 가 회수한다. 90초를 기다리며 수집을 비워두는 것보다 낫다.
+        loop.call_later(SHUTDOWN_GRACE_SEC, running.cancel)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_all)
+
     try:
-        # 거래소별로 독립된 태스크다. 하나가 죽어도 나머지는 계속 수집한다.
-        await asyncio.gather(*tasks)
+        await running
+    except asyncio.CancelledError:
+        log.info("종료 신호를 받았다 - 태스크를 정리하고 종료한다")
     finally:
         await store.close()
 

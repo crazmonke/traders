@@ -17,6 +17,7 @@ Type=simple
 User=root
 WorkingDirectory=/var/www/traders
 ExecStart=/var/www/traders/trading_engine/venv/bin/python -m trading_engine.tracking.result_tracker
+TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5
 
