@@ -131,3 +131,58 @@ def assess(values: list[float], min_effect: float = ROUND_TRIP_COST_PCT) -> Stab
         f"양수 {test.positive} / 음수 {test.negative} (p={test.p_value:.3f}), "
         f"중앙값 {median:+.3f}%",
     )
+
+
+
+# --- 크기를 반영한 검정 (2026-09-04 추가) --------------------------------------
+#
+# 부호 검정만으로는 **비대칭 손익**을 볼 수 없다. 추세추종을 재다가 부딪혔다:
+# 이기는 해는 2~6배, 지는 해는 0.75~0.99배였는데, 부호만 세면 24/44 로 "동전
+# 던지기"가 된다. 반대로 **누적 배수만 보면 한두 해가 전부를 만든 것**을 놓친다.
+#
+# 실제로 그 함정에 빠질 뻔했다 — 누적으로 보유 대비 +248% 이던 설정이
+# 기하평균으로는 0.96배(보유보다 못함)였다.
+
+
+@dataclass(frozen=True)
+class MeanTest:
+    """평균이 0 과 다른가. 부호가 아니라 크기를 본다."""
+
+    samples: int
+    mean: float
+    t_statistic: float
+    significant: bool
+
+    @property
+    def geometric(self) -> float:
+        """로그 초과수익을 넣었을 때의 기하평균 배수."""
+        import math
+
+        return math.exp(self.mean)
+
+
+# 자유도 30 이상에서 양측 5% 임계값. 표본이 적으면 더 커야 하지만, 그 구간은
+# 애초에 `MIN_WINDOWS` 가 막는다.
+T_CRITICAL = 2.02
+
+
+def mean_test(values: list[float]) -> MeanTest:
+    """평균이 0 과 유의하게 다른지. **로그 초과수익을 넣는 것을 전제로 한다.**
+
+    단순 수익률 차이를 넣으면 한 해의 +5,000%p 가 평균을 통째로 지배한다.
+    로그비는 배수를 대칭으로 다뤄 "몇 배 앞섰나"를 재므로 해마다 비교가 된다.
+    """
+    import math
+
+    n = len(values)
+    if n < 2:
+        return MeanTest(n, values[0] if values else 0.0, 0.0, False)
+
+    mean = statistics.mean(values)
+    stdev = statistics.stdev(values)
+    if stdev == 0:
+        return MeanTest(n, mean, 0.0, mean != 0.0)
+
+    t = mean / (stdev / math.sqrt(n))
+
+    return MeanTest(n, mean, t, abs(t) > T_CRITICAL)

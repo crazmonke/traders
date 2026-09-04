@@ -241,3 +241,57 @@ def test_stable_verdict_reports_direction_not_just_stability(capsys):
 
     assert "아니오" in bad and "예" not in bad.replace("아니오", "")
     assert "예" in good
+
+
+# --- 크기를 반영한 검정 ---------------------------------------------------------
+
+
+def test_sign_test_cannot_see_asymmetric_payoffs():
+    """추세추종을 재다 부딪힌 문제. 지는 해는 완만하고 이기는 해는 크다.
+
+    부호만 세면 "동전 던지기"로 보이지만, 실제로 쌓이는 것은 크기다.
+    """
+    import math
+
+    # 6번 지고(0.9배) 4번 크게 이긴다(2.0배) → 부호는 6:4 지만 복리는 크게 앞선다
+    ratios = [0.9] * 6 + [2.0] * 4
+    logs = [math.log(r) for r in ratios]
+
+    assert sign_test(logs).positive < sign_test(logs).negative  # 부호로는 진다
+    assert math.prod(ratios) > 1.0  # 복리로는 이긴다
+
+
+def test_mean_test_uses_magnitude():
+    import math
+
+    from trading_engine.validation.stability import mean_test
+
+    weak = mean_test([math.log(1.02)] * 10)  # 작지만 일관
+    strong = mean_test([math.log(1.5)] * 10)
+
+    assert strong.t_statistic > weak.t_statistic or strong.geometric > weak.geometric
+    assert strong.geometric == pytest.approx(1.5, rel=1e-6)
+
+
+def test_mean_test_is_not_fooled_by_one_huge_sample():
+    """한 구간의 큰 값이 전부를 만든 경우를 걸러야 한다.
+
+    누적 배수만 보면 좋아 보이지만, 분산이 커서 유의하지 않다.
+    """
+    import math
+
+    from trading_engine.validation.stability import mean_test
+
+    values = [math.log(0.95)] * 20 + [math.log(20.0)]
+
+    result = mean_test(values)
+
+    assert result.mean > 0  # 평균은 양수다
+    assert result.significant is False  # 그러나 증거는 아니다
+
+
+def test_mean_test_handles_tiny_samples():
+    from trading_engine.validation.stability import mean_test
+
+    assert mean_test([]).significant is False
+    assert mean_test([0.5]).significant is False
