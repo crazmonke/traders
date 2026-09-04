@@ -221,3 +221,23 @@ def test_simulation_only_fields_really_are_simulation_only():
     source = inspect.getsource(Backtester.compute_signals) + inspect.getsource(Backtester._usable)
     for field in SIMULATION_ONLY_FIELDS:
         assert f"_params.{field}" not in source, field
+
+
+# --- 판정 표기 -----------------------------------------------------------------
+
+
+def test_stable_verdict_reports_direction_not_just_stability(capsys):
+    """"안정" 은 "일관된다"는 뜻이지 "좋다"가 아니다.
+
+    기준선이 12구간 중 11구간에서 비용을 못 넘었을 때 화면에 "안정" 만 뜨면
+    정반대로 읽힌다. 실제로 그럴 뻔했다.
+    """
+    from trading_engine.validation.walkforward import verdict_line
+
+    verdict_line("기준선이 비용을 넘는가", [-0.3] * 11 + [0.1])
+    bad = capsys.readouterr().out
+    verdict_line("기준선이 비용을 넘는가", [0.3] * 11 + [-0.1])
+    good = capsys.readouterr().out
+
+    assert "아니오" in bad and "예" not in bad.replace("아니오", "")
+    assert "예" in good

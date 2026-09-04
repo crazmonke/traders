@@ -213,9 +213,19 @@ def report(title: str, cells: Sequence[Cell], now_ms: int) -> dict[int, float]:
     return edges
 
 
-def verdict_line(label: str, values: list[float]) -> None:
+def verdict_line(question: str, values: list[float]) -> None:
+    """판정을 **질문에 대한 답**으로 출력한다.
+
+    `stability.assess` 의 "안정" 은 "이 결과가 시기를 넘어 일관된다"는 뜻이지
+    "좋다"가 아니다. 기준선이 12구간 중 11구간에서 비용을 못 넘었을 때 화면에
+    "안정" 만 뜨면 정반대로 읽힌다 — 실제로 그럴 뻔했다(2026-09-04).
+    """
     result = stability.assess(values)
-    print(f"\n  {label}: **{result.verdict}** — {result.detail}")
+    if result.verdict == stability.VERDICT_STABLE:
+        answer = "예" if result.median > 0 else "아니오"
+        print(f"\n  {question}: **{answer}** ({len(values)}구간 일관) — {result.detail}")
+        return
+    print(f"\n  {question}: **{result.verdict}** — {result.detail}")
 
 
 async def main_async(args: argparse.Namespace) -> None:
