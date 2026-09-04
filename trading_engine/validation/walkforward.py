@@ -40,6 +40,7 @@ import asyncio
 import dataclasses
 import logging
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -55,6 +56,16 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SYMBOLS = ("BTC", "ETH", "SOL")
 NO_COST = CostModel(fee_rate=0.0, slippage_rate=0.0, label="none")
+
+# **신호 산출에 영향을 주지 않는** 항목들. 이것만 바꾸는 변형은 신호를 다시 계산하지
+# 않아도 된다 — `Backtester.compute_signals` 가 "익절·손절·진입 임계값과 무관"하다고
+# 명시돼 있고, 그 분리가 이 도구를 쓸 만하게 만든다(변형당 30분 → 몇 초).
+#
+# 여기 없는 항목(`timeframe`, `reference_exchange`)을 바꾸면 신호 자체가 달라지므로
+# 공유하면 **틀린 결과가 나온다.** 그래서 목록을 넓힐 때는 반드시 근거를 확인할 것.
+SIMULATION_ONLY_FIELDS = frozenset(
+    {"initial_capital", "take_profit_pct", "stop_loss_pct", "min_final_score", "position_size_pct"}
+)
 
 
 @dataclass(frozen=True)
@@ -83,17 +94,19 @@ def evaluate(
     exchange_candles: Mapping[str, Sequence[dict[str, Any]]],
     price_series: Sequence[dict[str, Any]],
     window: Window,
+    signals: Mapping[int, Any],
 ) -> Cell | None:
-    """한 구간을 돌린다. 신호는 한 번만 계산하고 비용 모델만 바꿔 두 번 시뮬레이션한다."""
-    if len(price_series) <= WINDOW + 2:
+    """미리 계산된 신호로 한 구간을 시뮬레이션한다.
+
+    비용 모델만 바꿔 두 번 돌린다 — 순수익과 무비용 손익을 같은 거래 위에서 비교해야
+    "엣지가 없는 것"과 "엣지보다 비용이 큰 것"을 구분할 수 있다.
+    """
+    if len(price_series) <= WINDOW + 2 or not signals:
         return None
 
-    tester = Backtester(params, costs_mod.REFERENCE)
-    signals = tester.compute_signals(exchange_candles, price_series)
-    if not signals:
-        return None
-
-    net = tester.run(exchange_candles, price_series, signals).metrics
+    net = Backtester(params, costs_mod.REFERENCE).run(
+        exchange_candles, price_series, signals
+    ).metrics
     gross = Backtester(params, NO_COST).run(exchange_candles, price_series, signals).metrics
 
     return Cell(
@@ -108,11 +121,18 @@ def evaluate(
 async def run(
     symbols: Sequence[str],
     windows: Sequence[Window],
-    overrides: Mapping[str, Any] | None = None,
+    variants: Sequence[Mapping[str, Any]],
     timeframe: str = "5m",
-) -> list[Cell]:
-    """모든 (심볼 × 구간) 을 돈다. 캔들은 캐시에서 온다."""
-    cells: list[Cell] = []
+) -> list[list[Cell]]:
+    """모든 (심볼 × 구간) 을 돌되 **신호는 한 번만 계산한다.**
+
+    `variants[0]` 이 기준선(빈 재정의)이고 나머지가 비교 대상이다. 지표 계산이 비용의
+    대부분이라, 변형마다 다시 계산하면 하나 물어볼 때마다 30분이 든다. 그러면 결국
+    검증을 안 하게 된다.
+
+    돌려주는 값은 변형별 결과 목록이다 (`variants` 와 같은 순서).
+    """
+    results: list[list[Cell]] = [[] for _ in variants]
     for window in windows:
         for symbol in symbols:
             candles = await cache.candles(symbol, window.since_ms, window.until_ms, timeframe)
@@ -120,16 +140,20 @@ async def run(
                 log.warning("%s %s: 캔들 없음", symbol, window.label)
                 continue
             series = data_mod.global_price_series(candles)
-            params = BacktestParams(
+            base = BacktestParams(
                 symbol=symbol, reference_exchange=GLOBAL_CONSENSUS, timeframe=timeframe
             )
-            if overrides:
-                params = dataclasses.replace(params, **overrides)
-            cell = evaluate(params, candles, series, window)
-            if cell is not None:
-                cells.append(cell)
+            # 신호는 변형과 무관하다. 한 번만 계산해 전부에 쓴다.
+            signals = Backtester(base, costs_mod.REFERENCE).compute_signals(candles, series)
+            if not signals:
+                continue
+            for slot, overrides in enumerate(variants):
+                params = dataclasses.replace(base, **overrides) if overrides else base
+                cell = evaluate(params, candles, series, window, signals)
+                if cell is not None:
+                    results[slot].append(cell)
         print(f"  {window.label} 완료", flush=True)
-    return cells
+    return results
 
 
 def by_window(cells: Sequence[Cell]) -> dict[int, list[Cell]]:
@@ -161,6 +185,13 @@ def parse_overrides(text: str) -> dict[str, Any]:
                 f"BacktestParams 에 없는 항목이다: {key!r}\n"
                 f"가능한 항목: {', '.join(sorted(fields))}"
             )
+        if key not in SIMULATION_ONLY_FIELDS:
+            # 신호를 공유해서 도는 구조라, 신호를 바꾸는 항목은 여기서 못 다룬다.
+            # 조용히 틀린 결과를 내는 것보다 거절하는 편이 낫다.
+            raise SystemExit(
+                f"{key!r} 는 신호 산출 자체를 바꾼다. 이 도구는 신호를 공유해서 돌기 때문에\n"
+                f"비교할 수 없다. 바꿀 수 있는 항목: {', '.join(sorted(SIMULATION_ONLY_FIELDS))}"
+            )
         out[key] = float(value) if value.replace(".", "", 1).lstrip("-").isdigit() else value
     return out
 
@@ -191,33 +222,28 @@ async def main_async(args: argparse.Namespace) -> None:
     now_ms = int(time.time() * 1000)
     windows = generate(count=args.windows, length_days=args.days, now_ms=now_ms)
     symbols = tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip())
+    variants = [parse_overrides(text) for text in args.variant]
 
     a, b = windows[-1].days_ago(now_ms)
     print(
         f"구간 {len(windows)}개 × {args.days}일 (최대 {b}일 전까지) · 심볼 {', '.join(symbols)}"
         f" · 왕복 비용 {stability.ROUND_TRIP_COST_PCT}%"
     )
+    if variants:
+        print(f"변형 {len(variants)}개: " + " · ".join(str(v) for v in variants))
+    print("\n캔들은 캐시에서 온다. 첫 실행은 수집 때문에 오래 걸린다.\n")
 
-    print("\n[기준선]")
-    base_cells = await run(symbols, windows, timeframe=args.timeframe)
-    base_edges = report("기준선", base_cells, now_ms)
+    results = await run(symbols, windows, [{}, *variants], timeframe=args.timeframe)
+
+    base_edges = report("기준선", results[0], now_ms)
     verdict_line("기준선이 비용을 넘는가", list(base_edges.values()))
 
-    if not args.variant:
-        return
-
-    overrides = parse_overrides(args.variant)
-    print(f"\n[변형] {overrides}")
-    variant_cells = await run(symbols, windows, overrides, timeframe=args.timeframe)
-    variant_edges = report(f"변형 {overrides}", variant_cells, now_ms)
-
-    shared = sorted(set(base_edges) & set(variant_edges))
-    deltas = [variant_edges[i] - base_edges[i] for i in shared]
-    print(f"\n══════ 변형 − 기준선 ══════")
-    print(f"{'구간':<6}{'개선폭':>10}")
-    for index, delta in zip(shared, deltas):
-        print(f"#{index + 1:<5}{delta:>+9.3f}%")
-    verdict_line("변형이 기준선보다 나은가", deltas)
+    for overrides, cells in zip(variants, results[1:]):
+        edges = report(f"변형 {overrides}", cells, now_ms)
+        shared = sorted(set(base_edges) & set(edges))
+        deltas = [edges[i] - base_edges[i] for i in shared]
+        print(f"\n  구간별 개선폭: " + "  ".join(f"#{i + 1} {d:+.3f}%" for i, d in zip(shared, deltas)))
+        verdict_line(f"변형 {overrides} 이 기준선보다 나은가", deltas)
 
 
 def main() -> None:
@@ -230,10 +256,16 @@ def main() -> None:
     parser.add_argument("--timeframe", default="5m")
     parser.add_argument(
         "--variant",
-        default="",
-        help="비교할 BacktestParams 재정의. 예: take_profit_pct=3.0,stop_loss_pct=1.5",
+        action="append",
+        default=[],
+        help="비교할 재정의. 여러 번 줄 수 있다 (신호는 한 번만 계산해 공유한다). "
+        "예: --variant take_profit_pct=3.0,stop_loss_pct=1.5 --variant min_final_score=85",
     )
     args = parser.parse_args()
+
+    # 첫 실행은 캔들 수집만 수십 분 걸린다. 블록 버퍼링이면 그동안 화면이 비어 있어
+    # 멈춘 것처럼 보인다 (macOS 에서는 `stdbuf -oL` 도 듣지 않는다).
+    sys.stdout.reconfigure(line_buffering=True)
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     asyncio.run(main_async(args))

@@ -18,7 +18,12 @@ from trading_engine.validation.stability import (
     assess,
     sign_test,
 )
-from trading_engine.validation.walkforward import Cell, parse_overrides, window_edges
+from trading_engine.validation.walkforward import (
+    SIMULATION_ONLY_FIELDS,
+    Cell,
+    parse_overrides,
+    window_edges,
+)
 from trading_engine.validation.windows import DAY_MS, Window, generate, utc_midnight
 
 
@@ -189,3 +194,30 @@ def test_overrides_are_checked_against_the_dataclass():
 
 def test_empty_overrides_are_allowed():
     assert parse_overrides("") == {}
+
+
+# --- 신호 공유 안전장치 ---------------------------------------------------------
+
+
+def test_signal_changing_fields_are_refused():
+    """신호를 공유해서 도는 구조라, 신호를 바꾸는 항목은 비교할 수 없다.
+
+    조용히 받아들이면 "같은 신호 위에서 비교했다"는 전제가 깨진 채로 표가 나온다.
+    """
+    assert "take_profit_pct" in SIMULATION_ONLY_FIELDS
+    assert "timeframe" not in SIMULATION_ONLY_FIELDS
+
+    with pytest.raises(SystemExit) as caught:
+        parse_overrides("timeframe=1h")
+    assert "신호 산출 자체를 바꾼다" in str(caught.value)
+
+
+def test_simulation_only_fields_really_are_simulation_only():
+    """`compute_signals` 가 쓰는 항목이 목록에 섞이면 틀린 비교가 된다."""
+    import inspect
+
+    from trading_engine.backtest.engine import Backtester
+
+    source = inspect.getsource(Backtester.compute_signals) + inspect.getsource(Backtester._usable)
+    for field in SIMULATION_ONLY_FIELDS:
+        assert f"_params.{field}" not in source, field

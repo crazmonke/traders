@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -58,17 +59,26 @@ async def collect(
     기준가 거래소가 여기 들어간다. 기준가 거래소를 빼면 체결할 가격이 사라진다.
     """
     specs = resolve_specs(exchanges or settings.exchanges)
-    collected: dict[str, list[dict[str, Any]]] = {}
 
-    for spec in specs:
-        try:
-            candles = await data_mod.fetch_candles(
-                spec, symbol, timeframe, since_ms, until_ms
+    # **거래소별로 동시에 받는다.** 하나씩 받으면 5거래소 × 페이지네이션이 그대로
+    # 더해져, 14일치 한 구간에 몇 분씩 든다(워크포워드 12구간이면 시간 단위가 된다).
+    # 거래소마다 호스트도 rate limit 도 다르므로 동시에 받아도 서로를 방해하지 않는다.
+    fetched = await asyncio.gather(
+        *(
+            data_mod.fetch_candles(spec, symbol, timeframe, since_ms, until_ms)
+            for spec in specs
+        ),
+        # 한 거래소가 빠져도 나머지로 합의를 낼 수 있다. 3개 미만이면 신호 자체가
+        # HOLD 로 강등되므로(§3.2) 결과에 그대로 드러난다.
+        return_exceptions=True,
+    )
+
+    collected: dict[str, list[dict[str, Any]]] = {}
+    for spec, candles in zip(specs, fetched):
+        if isinstance(candles, BaseException):
+            log.warning(
+                "캔들 수집 실패 - 이 거래소는 빼고 진행한다 (%s): %s", spec.code, candles
             )
-        except Exception:
-            # 한 거래소가 빠져도 나머지로 합의를 낼 수 있다. 3개 미만이면
-            # 신호 자체가 HOLD 로 강등되므로(§3.2) 결과에 그대로 드러난다.
-            log.exception("캔들 수집 실패 - 이 거래소는 빼고 진행한다 (%s)", spec.code)
             continue
         if candles:
             collected[spec.code] = candles
