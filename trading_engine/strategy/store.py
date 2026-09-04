@@ -1,8 +1,16 @@
 """`ai_signals` 영속화. (prompt.md v2 [Step 2] 요구사항 6)
 
-**AI 분석이 붙은 신호만 저장한다.** `up_prob`/`sideways_prob`/`risks_json` 이 전부
-NOT NULL 이라, AI 없이 저장하려면 없는 확률을 지어내야 한다. 룰 엔진만으로 낸 평가는
-Redis `consensus:{symbol}:{tf}` 에 남고(Step 2-a), DB 에는 들어가지 않는다.
+**AI 가 없어도 저장한다** (2026-09-04, 마이그레이션 007). 그전까지는 AI 분석이 붙은
+신호만 저장했는데, AI 가 점수에서 빠진 뒤로는(2026-09-03) 그 제약이 **비용 통제가
+적중률 데이터 수집을 막는** 결과만 낳았다. AI 예산이 seed(심볼당 하루 5건)라 기록도
+하루 25건으로 묶였다 — 실측 21시간에 24건.
+
+    analysis 가 None  → 확률·설명 컬럼은 NULL. "묻지 않았다"
+    analysis 가 있음  → 그대로 저장. "AI 가 답했다"
+
+빈 배열이 아니라 NULL 인 이유: `[]` 는 "AI 가 근거가 없다고 답했다"로 읽히는데
+실제로는 묻지 않은 것이다. 둘은 다른 사실이고, 나중에 "AI 가 붙은 신호가 더
+정확했나"를 물으려면 구분돼 있어야 한다.
 
 DECIMAL 컬럼의 자릿수를 넘기면 INSERT 가 통째로 실패한다. 새벽에 거래량이 0 에 가까운
 봉 다음에 급증이 오면 `volume_change_pct` 가 쉽게 6자리를 넘기므로 넣기 전에 자른다.
@@ -64,7 +72,7 @@ def _percent(ratio: Any, limit: float) -> float | None:
         return None
 
 
-def data_sources_json(evaluation: SignalEvaluation, analysis: AiAnalysis) -> str:
+def data_sources_json(evaluation: SignalEvaluation, analysis: AiAnalysis | None) -> str:
     """`data_sources_json` — 어떤 거래소와 어떤 모델로 만들어진 신호인지.
 
     AI 가 스스로 낸 등급(`analysis.signal`)도 같이 남긴다. 저장되는 `signal_type` 은
@@ -73,12 +81,18 @@ def data_sources_json(evaluation: SignalEvaluation, analysis: AiAnalysis) -> str
     """
     sources = evaluation.data_sources()
     sources["scoring_version"] = SCORING_VERSION
+    if analysis is None:
+        # 부르지 않았다는 사실 자체를 남긴다. 키가 없으면 "예전 형식"과 구분되지 않는다.
+        sources["ai"] = {"requested": False, "reason": "예산·게이트로 호출하지 않음"}
+        return json.dumps(sources, ensure_ascii=False)
+
     sources["ai"] = {
+        "requested": True,
         "model": analysis.model,
         "signal": analysis.signal,
         "score": analysis.ai_score,
         "probability_sum": round(analysis.probability_sum, 2),
-        # up_prob 등은 NOT NULL 이라 값은 그대로 저장한다. 화면이 이 플래그를 보고
+        # 확률 합계가 이상해도 값은 그대로 저장한다. 화면이 이 플래그를 보고
         # 신뢰할 수 없는 확률을 숨긴다 — 기록은 남기되 보여주지는 않는다.
         "probabilities_reliable": analysis.is_probability_sum_valid,
         # AI 는 점수에 들어가지 않는다(2026-09-03). 이 값은 "AI 는 이렇게 봤다"는 기록이고,
@@ -89,7 +103,7 @@ def data_sources_json(evaluation: SignalEvaluation, analysis: AiAnalysis) -> str
 
 
 def build_params(
-    evaluation: SignalEvaluation, analysis: AiAnalysis
+    evaluation: SignalEvaluation, analysis: AiAnalysis | None
 ) -> tuple[Any, ...]:
     snapshot: Mapping[str, Any] = evaluation.snapshot
     return (
@@ -100,12 +114,12 @@ def build_params(
         SCORING_VERSION,
         evaluation.signal_type,
         _score(evaluation.tech.score),
-        _score(analysis.ai_score),
+        _score(analysis.ai_score) if analysis else None,
         _score(evaluation.risk.score),
         _score(evaluation.final_score),
-        _decimal(analysis.up_prob, 999.99),
-        _decimal(analysis.sideways_prob, 999.99),
-        _decimal(analysis.down_prob, 999.99),
+        _decimal(analysis.up_prob, 999.99) if analysis else None,
+        _decimal(analysis.sideways_prob, 999.99) if analysis else None,
+        _decimal(analysis.down_prob, 999.99) if analysis else None,
         _decimal(snapshot.get("price"), 9_999_999_999.0),
         _decimal(snapshot.get("upbit_price"), 9_999_999_999.0),
         _decimal(snapshot.get("rsi"), 9999.99),
@@ -118,12 +132,14 @@ def build_params(
         _percent(snapshot.get("volume_change_rate"), 999_999.99),
         _decimal(evaluation.consensus.pct, 999.99),
         data_sources_json(evaluation, analysis),
-        json.dumps(list(analysis.reasons), ensure_ascii=False),
-        json.dumps(list(analysis.risks), ensure_ascii=False),
+        json.dumps(list(analysis.reasons), ensure_ascii=False) if analysis else None,
+        json.dumps(list(analysis.risks), ensure_ascii=False) if analysis else None,
     )
 
 
-async def save_signal(evaluation: SignalEvaluation, analysis: AiAnalysis) -> int | None:
+async def save_signal(
+    evaluation: SignalEvaluation, analysis: AiAnalysis | None = None
+) -> int | None:
     """`ai_signals` 에 한 행 넣고 id 를 돌려준다. 실패하면 None."""
     if evaluation.snapshot.get("price") is None:
         # entry_price_global 이 NOT NULL 이다. 가격을 못 낸 신호는 저장하지 않는다.

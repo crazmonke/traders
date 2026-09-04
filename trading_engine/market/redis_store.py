@@ -17,6 +17,7 @@ v2 다중 거래소 키는 prompt.md v2 3.1절을 따른다.
     ai:called:{symbol}:{tf}             -> String(TTL)   # AI 중복 호출 차단 (Step 2)
     ai:result:{symbol}:{tf}             -> String(JSON)  # 그 봉의 AI 분석 (재사용용)
     ai:seed:{symbol}                    -> String(TTL)   # seed 모드 호출 간격 (Step 2)
+    signal:saved:{symbol}:{tf}          -> String(TTL)   # 봉당 한 번만 DB 기록 (Step 7)
     watch:{symbol}                      -> String(TTL)   # 이 심볼을 보고 있는 유저 (Step 6·9)
     webhook:rate:{token}:{minute}       -> String(TTL)   # 토큰별 수신 제한 (Step 3-b)
     settings:ai_mode                    -> String        # 관리자가 바꾸는 AI 예산 모드 (Step 9-b)
@@ -70,6 +71,16 @@ def ai_call_key(symbol: str, timeframe: str = "5m") -> str:
 
 def ai_result_key(symbol: str, timeframe: str = "5m") -> str:
     return f"ai:result:{symbol}:{timeframe}"
+
+
+def signal_record_key(symbol: str, timeframe: str = "5m") -> str:
+    """봉당 한 번만 `ai_signals` 에 기록하기 위한 슬롯.
+
+    AI 호출 슬롯(`ai:called:*`)과 **따로 둔다.** AI 는 예산에 막혀 안 나갈 수 있지만
+    기록은 나가야 하기 때문이다 — 그 둘을 하나로 묶어놨던 것이 적중률 데이터가
+    하루 25건으로 묶여 있던 원인이다(마이그레이션 007).
+    """
+    return f"signal:saved:{symbol}:{timeframe}"
 
 
 def ai_seed_key(symbol: str) -> str:
@@ -214,6 +225,18 @@ class RedisStore:
     async def save_ai_mode(self, mode: str) -> None:
         """TTL 을 두지 않는다. 관리자가 끈 것은 다시 켤 때까지 유지돼야 한다."""
         await self._client.set(AI_MODE_KEY, mode)
+
+    async def claim_signal_record(self, symbol: str, timeframe: str, ttl: int) -> bool:
+        """이 봉의 DB 기록 슬롯을 선점한다. 이미 있으면 False.
+
+        엔진은 거래소 지표가 갱신될 때마다(초 단위) 평가하므로, 이 차단이 없으면
+        같은 봉이 수십 번 저장된다.
+        """
+        return bool(
+            await self._client.set(
+                signal_record_key(symbol, timeframe), "1", ex=ttl, nx=True
+            )
+        )
 
     async def claim_ai_seed(self, symbol: str, interval: int) -> bool:
         """seed 모드 호출 슬롯. `interval` 초에 한 번만 True 다.

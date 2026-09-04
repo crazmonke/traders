@@ -18,6 +18,7 @@ from trading_engine.ai.analyzer import (
 )
 from trading_engine.market.market_manager import MarketManager
 from trading_engine.market.redis_store import (
+    signal_record_key,
     RedisStore,
     SIGNAL_CHANNEL,
     ai_call_key,
@@ -31,6 +32,7 @@ from trading_engine.strategy.signal_pipeline import SignalPipeline
 
 # Step 2-a 테스트의 지표 픽스처를 그대로 쓴다. 같은 스냅샷에서 이어지는 단계라
 # 픽스처가 갈라지면 두 파일이 서로 다른 신호를 검증하게 된다.
+from trading_engine.indicators.calculator import TREND_MIXED
 from trading_engine.tests.test_strategy import (
     BULLISH,
     USD_EXCHANGES,
@@ -94,8 +96,8 @@ def build(analysis=ANALYSIS, indicators=None):
         calls["analyze"].append((symbol, consensus_pct, tuple(data_sources)))
         return analysis
 
-    async def saver(evaluation, ai):
-        calls["save"].append(evaluation)
+    async def saver(evaluation, ai=None):
+        calls["save"].append((evaluation, ai))
         return 4242
 
     engine = SignalEngine(manager, store, min_interval_sec=0.0)
@@ -311,9 +313,10 @@ async def test_next_candle_calls_ai_again():
     pipeline, calls, fake = build()
 
     await pipeline.run("BTC")
-    # 차단 키와 분석 캐시는 같은 TTL 이라 함께 사라진다.
+    # 차단 키·분석 캐시·기록 슬롯은 모두 같은 TTL 이라 함께 사라진다.
     fake.strings.pop(ai_call_key("BTC", "5m"))
     fake.strings.pop(ai_result_key("BTC", "5m"))
+    fake.strings.pop(signal_record_key("BTC", "5m"))
     await pipeline.run("BTC")
 
     assert len(calls["analyze"]) == 2
@@ -361,14 +364,116 @@ async def test_broken_probability_does_not_weaken_the_rule_signal():
 
 
 @pytest.mark.asyncio
-async def test_failed_analysis_saves_nothing():
+async def test_failed_analysis_still_records_the_signal():
+    """AI 가 실패해도 신호는 남는다. **설명이 없을 뿐 신호가 없는 게 아니다.**
+
+    예전에는 AI 실패 = 기록 없음이었다. 그러면 OpenAI 장애가 그대로 적중률 데이터의
+    구멍이 된다 — 정작 그 신호는 룰이 정상적으로 낸 것인데도.
+    """
     pipeline, calls, fake = build(analysis=None)
 
     evaluation = await pipeline.run("BTC")
 
     assert evaluation.ai_score is None
+    assert len(calls["save"]) == 1
+    assert len(fake.published) == 1
+
+
+# --- AI 경로와 기록 경로의 분리 (2026-09-04) ---------------------------------
+#
+# **이 절이 지키는 것**: AI 비용 통제가 적중률 데이터 수집을 막지 않는다.
+# 예전에는 둘이 한 경로였고, seed 예산(심볼당 하루 5건) 때문에 기록이 하루 25건으로
+# 묶여 있었다. AI 는 점수에 들어가지도 않는데(2026-09-03) 그랬다.
+
+
+@pytest.mark.asyncio
+async def test_signal_is_saved_without_ai():
+    """AI 를 못 붙여도 기록은 나가고, 저장 인자의 analysis 는 None 이다."""
+    pipeline, calls, _ = build(analysis=None)
+
+    await pipeline.run("BTC")
+
+    assert len(calls["save"]) == 1
+    evaluation, analysis = calls["save"][0]
+    assert analysis is None
+    assert evaluation.signal_type == "STRONG_BUY"
+
+
+@pytest.mark.asyncio
+async def test_one_record_per_candle():
+    """엔진은 거래소 지표가 갱신될 때마다(초 단위) 평가한다.
+
+    봉당 차단이 없으면 같은 봉이 수십 번 저장되고, 적중률 표본이 그만큼 부풀려진다.
+    """
+    pipeline, calls, _ = build(analysis=None)
+
+    for _ in range(5):
+        await pipeline.run("BTC")
+
+    assert len(calls["save"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_hold_is_never_recorded():
+    """진입하지 않은 신호는 적중 여부를 판정할 수 없다(`strategy/labeling.py`).
+
+    거래소가 셋 미만이면 §3.2 가 HOLD 로 강등한다.
+    """
+    pipeline, calls, _ = build(analysis=None)
+    # 거래소 표본을 줄여 HOLD 강등을 만든다.
+    pipeline._engine._manager._indicators = {
+        key: value
+        for index, (key, value) in enumerate(pipeline._engine._manager._indicators.items())
+        if index < 2
+    }
+
+    evaluation = await pipeline.run("BTC")
+
+    assert evaluation is None or evaluation.signal_type == "HOLD"
     assert calls["save"] == []
-    assert fake.published == []
+
+
+@pytest.mark.asyncio
+async def test_gate_still_decides_what_counts_as_a_signal():
+    """게이트(Tech 70↑/30↓ + Consensus 50%↑)를 통과하지 못하면 기록하지 않는다.
+
+    기록 대상을 넓히는 것과 아무거나 넣는 것은 다르다 — 중립 구간까지 넣으면
+    "신호"의 의미가 사라지고 적중률이 시장 방향 통계가 된다.
+    """
+    pipeline, calls, _ = build(analysis=None)
+    for exchange, symbol in USD_EXCHANGES:
+        pipeline._engine._manager.record_indicators(
+            exchange, symbol, make_indicators(symbol, rsi=50.0, ma_trend=TREND_MIXED, adx=15.0)
+        )
+    pipeline._engine._manager.record_indicators(
+        "upbit", "BTC/KRW", make_indicators("BTC/KRW", rsi=50.0, ma_trend=TREND_MIXED, adx=15.0)
+    )
+
+    evaluation = await pipeline.run("BTC")
+
+    assert evaluation is not None
+    assert evaluation.needs_ai is False
+    assert evaluation.is_recordable is False
+    assert calls["save"] == []
+
+
+@pytest.mark.asyncio
+async def test_record_slot_is_not_taken_when_nothing_is_recordable():
+    """기록 대상이 아닌데 슬롯을 잡아버리면, 같은 봉에 나중에 나온 진짜 신호를 놓친다."""
+    from trading_engine.market.redis_store import signal_record_key as key
+
+    pipeline, _, fake = build(analysis=None)
+    for exchange, symbol in USD_EXCHANGES:
+        pipeline._engine._manager.record_indicators(
+            exchange, symbol, make_indicators(symbol, rsi=50.0, ma_trend=TREND_MIXED, adx=15.0)
+        )
+    pipeline._engine._manager.record_indicators(
+        "upbit", "BTC/KRW", make_indicators("BTC/KRW", rsi=50.0, ma_trend=TREND_MIXED, adx=15.0)
+    )
+
+    await pipeline.run("BTC")
+
+    assert key("BTC", "5m") not in fake.strings
 
 
 # --- ai_signals 저장 ---------------------------------------------------------

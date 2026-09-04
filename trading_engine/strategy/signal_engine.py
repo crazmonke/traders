@@ -51,6 +51,7 @@ from trading_engine.market.redis_store import RedisStore
 from trading_engine.strategy import consensus as consensus_mod
 from trading_engine.strategy import risk as risk_mod
 from trading_engine.strategy.consensus import BUY, NEUTRAL, SELL, ConsensusResult
+from trading_engine.strategy import labeling
 from trading_engine.strategy.rule_engine import RuleEngine, TechScore, should_request_ai
 from trading_engine.strategy.risk import RiskScore
 
@@ -133,6 +134,20 @@ class SignalEvaluation:
     def direction(self) -> str:
         return self.consensus.direction
 
+    @property
+    def is_recordable(self) -> bool:
+        """`ai_signals` 에 남길 신호인가. **AI 를 부르는지와는 무관하다.**
+
+        같은 게이트(`needs_ai`)를 쓴다 — 방향성이 뚜렷하고 표본이 충분한 평가라는
+        뜻이고, 그것이 이 제품에서 "신호"의 의미다. 다만 **HOLD 는 제외한다**:
+        진입하지 않았으므로 적중 여부를 판정할 수 없고(`strategy/labeling.py`),
+        기록해 봐야 성과 추적이 건너뛴다.
+
+        게이트를 통과했는데 HOLD 인 경우가 실제로 있다 — Tech 는 뚜렷한데 거래소
+        방향이 갈리거나(§3.2 NEUTRAL) 표본이 모자란 경우다.
+        """
+        return self.needs_ai and self.signal_type not in labeling.UNLABELED_SIGNALS
+
     def with_ai(self, ai_score: float, signal_type: str | None = None) -> "SignalEvaluation":
         """AI 가 낸 점수를 **기록만** 한다. 등급과 Final Score 는 바뀌지 않는다.
 
@@ -159,6 +174,7 @@ class SignalEvaluation:
             "exchange_consensus_pct": round(self.consensus.pct, 2),
             "direction": self.direction,
             "needs_ai": self.needs_ai,
+            "is_recordable": self.is_recordable,
             "demoted_reason": self.demoted_reason,
             "consensus": self.consensus.as_dict(),
             "tech": self.tech.as_dict(),

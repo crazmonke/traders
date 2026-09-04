@@ -161,8 +161,12 @@ def build_pipeline(mode, seed_calls=5):
 
 
 @pytest.mark.asyncio
-async def test_off_mode_still_emits_rule_signals():
-    """전등을 꺼도 가게는 돌아간다 — 룰 신호는 그대로 나온다."""
+async def test_off_mode_still_emits_and_records_rule_signals():
+    """전등을 꺼도 가게는 돌아간다 — 룰 신호가 나오고 **기록도 된다.**
+
+    2026-09-04 이전에는 AI 를 끄면 저장까지 멈췄다. AI 는 점수에 들어가지도 않는데
+    비용 스위치가 적중률 데이터 수집을 막고 있었다(하루 25건). 이제 둘은 독립이다.
+    """
     pipeline, calls, fake = build_pipeline(MODE_OFF)
 
     evaluation = await pipeline.run("BTC")
@@ -171,7 +175,8 @@ async def test_off_mode_still_emits_rule_signals():
     assert evaluation.signal_type != "HOLD"  # 신호는 정상 산출
     assert evaluation.ai_score is None
     assert calls["analyze"] == []
-    assert calls["save"] == []
+    # **기록은 나간다.** AI 없이 저장되므로 analysis 는 None 이다.
+    assert len(calls["save"]) == 1
     # off 모드는 봉 차단 키조차 쓰지 않는다.
     assert ai_call_key("BTC", "5m") not in fake.strings
 
