@@ -272,3 +272,19 @@ button.ghost:hover { color: var(--text); }
     .nav a { padding: 6px 8px; }
     .bar-row { grid-template-columns: 76px 1fr 44px; }
 }
+
+/* --- 적중률 화면: 청산 사유 비중 막대 (관리자 전용) -------------------------
+   상승/하락 색(--up/--down)을 쓰지 않는다. 그 색은 로케일에 따라 뒤집히는데
+   익절·손절은 뒤집히지 않는 개념이라 섞이면 오독을 부른다. */
+.mixbar {
+    display: flex;
+    height: 6px;
+    width: 92px;
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--surface-2);
+}
+.mix { display: block; height: 100%; }
+.mix.tp { background: #4bd6a0; }   /* 익절 */
+.mix.sl { background: var(--warn); } /* 손절 */
+.mix.tl { background: #4a5670; }   /* 시간초과 — 무채색. 좋지도 나쁘지도 않다 */

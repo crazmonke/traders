@@ -6,6 +6,7 @@ namespace App\Http;
 
 use App\Auth\Guard;
 use App\Auth\Plan;
+use App\Repository\AccuracyRepository;
 use App\Repository\AdminRepository;
 use App\Repository\AuditRepository;
 use App\Utils\RedisClient;
@@ -18,6 +19,7 @@ use App\Utils\RedisClient;
  *   GET   /api/v1/admin/ai-budget        AI 호출 예산 모드
  *   PATCH /api/v1/admin/ai-budget        모드 전환 (재시작 없이 즉시 반영)
  *   GET   /api/v1/admin/system           엔진 상태
+ *   GET   /api/v1/admin/accuracy         적중률 (Step 7 결과) — 관리자 전용
  *
  * **역할 변경(user↔admin)은 여기 없다.** 승격 API 가 존재하는 것 자체가 권한 상승
  * 취약점이라, CLI(`api/bin/make-admin.php`)로만 한다.
@@ -34,6 +36,7 @@ final class Admin
         private ?AdminRepository $repository = null,
         private ?Guard $guard = null,
         private ?AuditRepository $audit = null,
+        private ?AccuracyRepository $accuracy = null,
     ) {
     }
 
@@ -45,6 +48,11 @@ final class Admin
     private function audit(): AuditRepository
     {
         return $this->audit ??= new AuditRepository();
+    }
+
+    private function accuracy(): AccuracyRepository
+    {
+        return $this->accuracy ??= new AccuracyRepository();
     }
 
     public function handle(string $method, string $subPath): never
@@ -75,8 +83,42 @@ final class Admin
         if ($subPath === '/system' && $method === 'GET') {
             $this->system();
         }
+        if ($subPath === '/accuracy' && $method === 'GET') {
+            $this->accuracyReport();
+        }
 
         Response::error(Response::NOT_FOUND, '없는 경로입니다.', 404);
+    }
+
+    /**
+     * 적중률 (Step 7 결과). **관리자 전용이고 유저에게 노출하지 않는다** —
+     * 표현 문구가 법률 검토 대상이다(`docs/LEGAL.md`). 지금은 운영자가 스스로
+     * 도구를 신뢰할 수 있는지 판단하기 위한 내부 화면이다.
+     *
+     * 배점표 버전을 반드시 나눠서 본다. 섞으면 "고쳤더니 나아졌는가"를 알 수 없다.
+     */
+    private function accuracyReport(): never
+    {
+        $days = AccuracyRepository::clampDays($_GET['days'] ?? 30);
+        $versions = $this->accuracy()->versions($days);
+
+        // 기본값은 결과가 있는 가장 최신 버전이다. 없는 버전을 넘기면 빈 표가 되므로
+        // 요청 값이 목록에 없으면 조용히 무시하고 기본값을 쓴다.
+        $requested = is_string($_GET['version'] ?? null) ? $_GET['version'] : null;
+        $version = in_array($requested, $versions, true) ? $requested : ($versions[0] ?? null);
+
+        Response::success(['accuracy' => [
+            'days'            => $days,
+            'versions'        => $versions,
+            'version'         => $version,
+            'small_sample'    => AccuracyRepository::SMALL_SAMPLE,
+            'backlog'         => $this->accuracy()->backlog(),
+            'by_horizon'      => $this->accuracy()->byVersionHorizon($days),
+            'by_symbol'       => $version ? $this->accuracy()->bySymbol($version, $days) : [],
+            'by_signal_type'  => $version ? $this->accuracy()->bySignalType($version, $days) : [],
+            'by_score_bucket' => $version ? $this->accuracy()->byScoreBucket($version, $days) : [],
+            'recent'          => $version ? $this->accuracy()->recent($version, $days) : [],
+        ]]);
     }
 
     /** 등급 수동 부여. 결제(Step 13) 전까지는 이것이 유일한 경로다. */

@@ -124,6 +124,7 @@ switch ($path) {
                 '/api/v1/backtest/run',
                 '/api/v1/backtest/logs',
                 '/api/v1/safety/state',
+                '/api/v1/admin/accuracy',
             ],
         ]);
 }

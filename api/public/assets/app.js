@@ -128,9 +128,19 @@ function price(value) {
                      : v.toLocaleString('ko-KR', { maximumFractionDigits: 4 });
 }
 
+/**
+ * "N분 전". API 가 주는 시각은 **DB 서버의 로컬 시각**(KST)이고 시간대 표시가 없다.
+ *
+ * 예전에는 `+ 'Z'` 를 붙여 UTC 로 읽었는데, 서버가 KST 라 9시간이 어긋나 모든 시각이
+ * 미래가 됐고 화면에는 전부 "방금"으로 나왔다. 접미사를 붙이지 않으면 JS 가 브라우저
+ * 로컬 시각으로 읽는다 — 지금은 서버·브라우저가 같은 KST 라 이것이 맞다.
+ *
+ * **다국어(Step 10) 때 반드시 정리할 것**: API 가 시간대까지 담은 ISO8601 로 주고
+ * 화면은 그것만 믿게 해야 다른 시간대의 접속자에게도 맞는다.
+ */
 function when(ts) {
     if (!ts) return '—';
-    const d = new Date(ts.replace(' ', 'T') + 'Z');
+    const d = new Date(ts.replace(' ', 'T'));
     const mins = Math.round((Date.now() - d.getTime()) / 60000);
     if (mins < 1) return '방금';
     if (mins < 60) return `${mins}분 전`;
@@ -169,7 +179,9 @@ function shell(inner, active) {
         ['#/backtest', '백테스트'],
     ];
     // 관리자 메뉴는 관리자에게만 그린다. 차단 자체는 서버가 404 로 한다.
-    if (state.user?.role === 'admin') items.push(['#/admin', '관리']);
+    if (state.user?.role === 'admin') {
+        items.push(['#/admin', '관리'], ['#/accuracy', '적중률']);
+    }
 
     const nav = items.map(([href, label]) =>
         `<a href="${href}" class="${active === href ? 'on' : ''}">${label}</a>`
@@ -673,6 +685,177 @@ async function viewAdmin() {
         patchSafety({ kill_switch_active: !safety.safety.kill_switch_active });
 }
 
+/* --- 적중률 (관리자 전용) ------------------------------------------------- */
+
+/**
+ * Step 7 이 기록한 실제 결과를 보는 화면.
+ *
+ * **유저에게 노출하지 않는다** — 표현 문구가 법률 검토 대상이다. 지금은 운영자가
+ * 스스로 이 도구를 신뢰할 수 있는지 판단하기 위한 내부 화면이다. 그래서 좋아 보이게
+ * 꾸미지 않고 **불리한 숫자를 먼저 보여준다**(표본 부족 · 시간초과 비중 · 점수 무관계).
+ */
+const ACCURACY_STATE = { days: 30, version: null };
+
+const EXIT_LABEL = {
+    TAKE_PROFIT: '<span class="status ok">익절</span>',
+    STOP_LOSS: '<span class="status bad">손절</span>',
+    TIME_LIMIT: '<span class="pending">시간초과</span>',
+};
+
+/** 표본이 적으면 통계로 읽으면 안 된다. 회색 처리하고 이유를 남긴다. */
+function sample(row, text) {
+    return row.small_sample
+        ? `<span class="pending" title="표본 부족 — 통계로 읽지 마세요">${text}</span>`
+        : text;
+}
+
+function pct(value) {
+    return value === null || value === undefined ? '—' : `${num(value, 1)}%`;
+}
+
+/** 무엇으로 끝났는지가 승률보다 많은 것을 말해준다. */
+function exitMix(row) {
+    const total = row.evaluated || 1;
+    const bar = (n, cls) => (n === 0 ? '' :
+        `<span class="mix ${cls}" style="width:${((n / total) * 100).toFixed(1)}%"></span>`);
+    return `<div class="mixbar" title="익절 ${row.take_profit} / 손절 ${row.stop_loss} / 시간초과 ${row.time_limit}">${
+        bar(row.take_profit, 'tp')}${bar(row.stop_loss, 'sl')}${bar(row.time_limit, 'tl')}</div>`;
+}
+
+const ACCURACY_HEAD = `<thead><tr>
+    <th></th><th>평가</th><th>적중률</th><th>평균 손익</th>
+    <th>익절/손절/시간초과</th><th></th></tr></thead>`;
+
+function accuracyRows(rows, labelKey, labelFn) {
+    if (!rows.length) return '<tr><td colspan="6">기록 없음</td></tr>';
+    return rows.map((r) => `
+        <tr>
+            <td>${labelFn ? labelFn(r) : esc(String(r[labelKey]))}</td>
+            <td>${r.evaluated}</td>
+            <td><strong>${sample(r, pct(r.accuracy_pct))}</strong></td>
+            <td>${num(r.avg_return, 2)}%</td>
+            <td>${r.take_profit} / ${r.stop_loss} / ${r.time_limit}</td>
+            <td>${exitMix(r)}</td>
+        </tr>`).join('');
+}
+
+async function viewAccuracy() {
+    app().innerHTML = shell('<p class="sub">불러오는 중…</p>', '#/accuracy');
+
+    const query = new URLSearchParams({ days: String(ACCURACY_STATE.days) });
+    if (ACCURACY_STATE.version) query.set('version', ACCURACY_STATE.version);
+    const { accuracy: a } = await call(`/admin/accuracy?${query}`);
+    ACCURACY_STATE.version = a.version;
+
+    const dayTabs = [7, 30, 90, 365].map((d) =>
+        `<button class="${a.days === d ? 'on' : ''}" data-days="${d}">${d}일</button>`).join('');
+    const versionTabs = a.versions.map((v) =>
+        `<button class="${a.version === v ? 'on' : ''}" data-version="${esc(v)}">배점표 ${esc(v)}</button>`
+    ).join('') || '<span class="meta">평가된 신호가 아직 없습니다</span>';
+
+    const b = a.backlog;
+    const progress = b.expected ? Math.round((b.evaluated / b.expected) * 100) : 0;
+
+    // 표제 표. **배점표를 나눠서 보여주는 것이 이 화면의 존재 이유다.**
+    const horizonRows = a.by_horizon.length
+        ? a.by_horizon.map((r) => `
+            <tr>
+                <td><span class="plan-tag">${esc(r.version)}</span></td>
+                <td>${esc(r.horizon)}</td>
+                <td>${r.evaluated}</td>
+                <td><strong>${sample(r, pct(r.accuracy_pct))}</strong></td>
+                <td>${num(r.avg_return, 2)}%</td>
+                <td>${r.take_profit} / ${r.stop_loss} / ${r.time_limit}</td>
+                <td>${exitMix(r)}</td>
+            </tr>`).join('')
+        : '<tr><td colspan="7">아직 평가된 신호가 없습니다</td></tr>';
+
+    const recentRows = a.recent.length ? a.recent.map((r) => `
+        <tr>
+            <td>#${r.signal_id}</td>
+            <td>${esc(r.symbol)}</td>
+            <td>${signalBadge(r.signal_type)}</td>
+            <td>${r.final_score}</td>
+            <td>${esc(r.horizon)}</td>
+            <td>${num(r.return_pct, 2)}%</td>
+            <td>${EXIT_LABEL[r.exit_reason] || '—'}</td>
+            <td>${Number(r.is_accurate) === 1
+                ? '<span class="status ok">적중</span>' : '<span class="status bad">빗나감</span>'}</td>
+            <td class="meta">${when(r.created_at)}</td>
+        </tr>`).join('') : '<tr><td colspan="9">기록 없음</td></tr>';
+
+    app().innerHTML = shell(`
+        <h1>적중률</h1>
+        <p class="sub">Step 7 성과 추적이 기록한 <strong>실제 결과</strong>입니다.
+            백테스트가 아닙니다. 관리자 전용 화면입니다.</p>
+
+        <div class="tabs" id="dayTabs">${dayTabs}</div>
+        <div class="tabs" id="versionTabs">${versionTabs}</div>
+
+        <div class="card">
+            <div class="row" style="gap:24px">
+                <div><div class="meta">평가 완료</div>
+                    <div class="price" style="font-size:18px">${num(b.evaluated, 0)}
+                        <span class="meta">/ ${num(b.expected, 0)} (${progress}%)</span></div></div>
+                <div><div class="meta">마지막 평가</div>
+                    <div class="price" style="font-size:18px">${when(b.last_evaluated_at)}</div></div>
+            </div>
+            <div class="meta" style="margin-top:10px">
+                신호 하나당 시간제한 5종(5m·15m·1h·4h·1d)을 각각 평가합니다.
+                긴 제한은 그만큼 시간이 지나야 채워집니다 — 1d 는 24시간 뒤입니다.
+            </div>
+        </div>
+
+        <h2>배점표 × 시간제한</h2>
+        <p class="sub">배점표가 다르면 <strong>다른 규칙으로 만든 다른 신호</strong>입니다.
+            섞어서 평균 내면 "고쳤더니 나아졌는가"를 알 수 없어 항상 나눠서 봅니다.</p>
+        <div class="table-wrap"><table>
+            <thead><tr><th>배점표</th><th>제한</th><th>평가</th><th>적중률</th>
+                <th>평균 손익</th><th>익절/손절/시간초과</th><th></th></tr></thead>
+            <tbody>${horizonRows}</tbody></table></div>
+
+        <h2>점수 구간별 <span class="meta">— 점수가 높을수록 좋은 신호인가</span></h2>
+        <p class="sub">백테스트(Step 16)에서는 <strong>v2·v3 모두 점수가 품질을 제대로
+            가르지 못했습니다.</strong> 운영 데이터에서도 그런지 지켜보는 표입니다.
+            아래로 갈수록 적중률이 올라가지 않으면 점수를 확신도로 읽으면 안 됩니다.</p>
+        <div class="table-wrap"><table>${ACCURACY_HEAD}
+            <tbody>${accuracyRows(a.by_score_bucket, 'bucket',
+        (r) => `${r.bucket}~${r.bucket + 9}점`)}</tbody></table></div>
+
+        <h2>심볼별</h2>
+        <div class="table-wrap"><table>${ACCURACY_HEAD}
+            <tbody>${accuracyRows(a.by_symbol, 'symbol')}</tbody></table></div>
+
+        <h2>신호 종류별</h2>
+        <div class="table-wrap"><table>${ACCURACY_HEAD}
+            <tbody>${accuracyRows(a.by_signal_type, 'signal_type',
+        (r) => signalBadge(r.signal_type))}</tbody></table></div>
+
+        <h2>최근 개별 결과 <span class="meta">— 최대 50건</span></h2>
+        <p class="sub">집계만 보면 무엇이 이상한지 알 수 없습니다.</p>
+        <div class="table-wrap"><table>
+            <thead><tr><th>신호</th><th>심볼</th><th>종류</th><th>점수</th><th>제한</th>
+                <th>손익</th><th>청산</th><th>판정</th><th>생성</th></tr></thead>
+            <tbody>${recentRows}</tbody></table></div>
+
+        <div class="card" style="margin-top:18px">
+            <div class="meta">
+                <strong>읽을 때 주의.</strong>
+                표본이 ${a.small_sample}건 미만인 줄은 회색입니다 — 통계가 아닙니다.
+                <strong>시간초과</strong>가 대부분이면 그 적중률은 "익절·손절 어디에도 닿지 않은 채
+                시간이 다 됐을 때 방향이 맞았다"는 뜻이지, 그 폭만큼 벌었다는 뜻이 아닙니다.
+                왕복 거래 비용이 약 0.18%이므로 평균 손익이 그보다 작으면 실거래에서는 손실입니다.
+            </div>
+        </div>`, '#/accuracy');
+
+    document.querySelectorAll('#dayTabs button').forEach((btn) => {
+        btn.onclick = () => { ACCURACY_STATE.days = Number(btn.dataset.days); viewAccuracy(); };
+    });
+    document.querySelectorAll('#versionTabs button').forEach((btn) => {
+        btn.onclick = () => { ACCURACY_STATE.version = btn.dataset.version; viewAccuracy(); };
+    });
+}
+
 /* --- 라우팅 -------------------------------------------------------------- */
 
 async function route() {
@@ -702,6 +885,7 @@ async function route() {
         if (hash.startsWith('#/signals')) return await viewSignals();
         if (hash.startsWith('#/backtest')) return await viewBacktest();
         if (hash.startsWith('#/admin')) return await viewAdmin();
+        if (hash.startsWith('#/accuracy')) return await viewAccuracy();
         return await viewDashboard();
     } catch (error) {
         app().innerHTML = shell(
