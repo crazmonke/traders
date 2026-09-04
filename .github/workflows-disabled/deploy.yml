@@ -1,3 +1,6 @@
+# 서비스 보류로 자동 배포 비활성화 (2026-09-04). 재활성화하려면
+# .github/workflows/ 로 다시 옮기고, 서버 authorized_keys에 배포키를
+# 재등록해야 한다 (github-actions-deploy 키는 서버에서 제거됨).
 name: Deploy
 
 on:
