@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# 검증용 캔들 캐시 (Step 17). 과거 구간이라 내용은 안 바뀌지만 용량이 크다.
+.cache/
+
 # Python
 trading_engine/venv/
 trading_engine/__pycache__/
