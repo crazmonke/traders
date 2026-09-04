@@ -1524,7 +1524,7 @@ Step 16 에서 **단일 구간 측정은 시기마다 부호가 뒤집힌다**�
 | 파일 | 역할 |
 | --- | --- |
 | `windows.py` | 겹치지 않는 구간 생성. **UTC 자정 정렬** — 실행할 때마다 경계가 밀리면 캐시가 매번 무효가 된다 |
-| `cache.py` | 캔들 로컬 캐시. 12구간 × 3심볼 × 5거래소 수집이 실측 20분 넘는다. 재실행이 비싸면 검증을 안 하게 된다 |
+| `cache.py` | 캔들 로컬 캐시. 과거 구간은 내용이 바뀌지 않으므로 만료를 두지 않는다 |
 | `stability.py` | **부호 검정**으로 판정. 눈대중을 없앤다 |
 | `walkforward.py` | 러너 + CLI |
 
@@ -1542,17 +1542,28 @@ Step 16 에서 **단일 구간 측정은 시기마다 부호가 뒤집힌다**�
 지배된다 — Step 16 에서 배리어를 넓힐수록 총수익이 좋아진 원인이 신호 개선이 아니라
 거래 수 감소였다.
 
+### 검증을 싸게 만든 두 가지
+
+**1. 거래소별 병렬 수집** (`backtest/runner.py`). 하나씩 받으면 5거래소 × 페이지네이션이
+그대로 더해진다. 실측으로 **한 구간(BTC 14일 5분봉)에 약 4분** 이 걸렸고, 12구간 ×
+3심볼이면 수집만 두 시간이다. 거래소마다 호스트도 rate limit 도 다르므로 동시에 받아도
+서로를 방해하지 않는다. → **4분 → 7.8초.**
+
+**2. 변형 간 신호 공유.** `compute_signals` 는 익절·손절·진입 임계값과 무관하다.
+그래서 한 번 계산해 모든 변형에 쓴다 — 변형을 세 개 물어보는 비용이 하나와 같다.
+신호를 바꾸는 항목(`timeframe`·`reference_exchange`)을 `--variant` 로 주면 **거절한다.**
+조용히 받아들이면 "같은 신호 위에서 비교했다"는 전제가 깨진 채로 표가 나온다.
+
 ### 쓰는 법
 
 ```bash
 # 지금 전략이 구간마다 어떤 성적인지
 python -m trading_engine.validation.walkforward
 
-# 익절·손절 폭을 바꾸면 나아지는가
-python -m trading_engine.validation.walkforward --variant take_profit_pct=3.0,stop_loss_pct=1.5
-
-# 진입 임계값을 올리면 나아지는가
-python -m trading_engine.validation.walkforward --variant min_final_score=85
+# 여러 변형을 한 번에 (신호는 한 번만 계산해 공유한다)
+python -m trading_engine.validation.walkforward \
+    --variant take_profit_pct=3.0,stop_loss_pct=1.5 \
+    --variant min_final_score=85
 ```
 
 `BacktestParams` 에 없는 항목을 쓰면 즉시 실패한다 — 오타를 조용히 무시하면
