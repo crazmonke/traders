@@ -17,17 +17,18 @@ from typing import Any, Mapping
 from trading_engine.ai.analyzer import AiAnalysis
 from trading_engine.database import mysql
 from trading_engine.strategy.signal_engine import SignalEvaluation
+from trading_engine.strategy.versioning import SCORING_VERSION
 
 log = logging.getLogger(__name__)
 
 INSERT_SQL = (
     "INSERT INTO ai_signals ("
-    "symbol, timeframe, signal_type, tech_score, ai_score, risk_score, final_score, "
+    "symbol, timeframe, scoring_version, signal_type, tech_score, ai_score, risk_score, final_score, "
     "up_prob, sideways_prob, down_prob, entry_price_global, entry_price_upbit, "
     "rsi_val, macd_val, bollinger_position, stochastic_k, stochastic_d, adx_val, cci_val, "
     "volume_change_pct, exchange_consensus_pct, data_sources_json, reasons_json, risks_json"
     ") VALUES ("
-    "%s, %s, %s, %s, %s, %s, %s, "
+    "%s, %s, %s, %s, %s, %s, %s, %s, "
     "%s, %s, %s, %s, %s, "
     "%s, %s, %s, %s, %s, %s, %s, "
     "%s, %s, %s, %s, %s)"
@@ -71,6 +72,7 @@ def data_sources_json(evaluation: SignalEvaluation, analysis: AiAnalysis) -> str
     맞았나"를 보려면 AI 의 원래 의견이 남아 있어야 한다. 이 값을 위한 컬럼은 없다.
     """
     sources = evaluation.data_sources()
+    sources["scoring_version"] = SCORING_VERSION
     sources["ai"] = {
         "model": analysis.model,
         "signal": analysis.signal,
@@ -93,6 +95,9 @@ def build_params(
     return (
         evaluation.symbol,
         evaluation.timeframe,
+        # 이 신호가 어떤 배점 체계로 만들어졌는지. 적중률 집계는 이 값으로 나눠야
+        # 서로 다른 규칙의 신호를 섞지 않는다 (`strategy/versioning.py`).
+        SCORING_VERSION,
         evaluation.signal_type,
         _score(evaluation.tech.score),
         _score(analysis.ai_score),

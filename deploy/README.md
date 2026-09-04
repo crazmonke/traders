@@ -125,8 +125,29 @@ systemctl enable --now ai-trading-engine ai-trading-scheduler
 ```bash
 systemctl status ai-trading-scheduler
 journalctl -u ai-trading-scheduler -n 50 --no-pager   # "평가 완료 N건 기록"
-mysql -e "SELECT horizon, COUNT(*), AVG(is_accurate) FROM ai_signal_results GROUP BY horizon" ai_trading
 ```
+
+### 적중률 조회 — **반드시 배점표 버전으로 나눈다**
+
+배점표를 고치면 그 전후의 신호는 다른 규칙으로 만들어진 다른 것이다. 섞어서 평균을
+내면 "고쳤더니 나아졌는가"를 알 수 없고, 대외적으로 말하는 적중률도 무엇의 적중률인지
+불분명해진다(`docs/LEGAL.md`). `ai_signals.scoring_version` 이 그 기준이다.
+
+```bash
+mysql ai_trading -e "
+SELECT s.scoring_version 배점표, r.horizon 제한, COUNT(*) 건수,
+       ROUND(AVG(r.is_accurate)*100,1) 적중률,
+       SUM(r.exit_reason='TAKE_PROFIT') 익절,
+       SUM(r.exit_reason='STOP_LOSS')   손절,
+       SUM(r.exit_reason='TIME_LIMIT')  시간초과
+FROM ai_signal_results r
+JOIN ai_signals s ON s.id = r.signal_id
+GROUP BY s.scoring_version, r.horizon
+ORDER BY s.scoring_version, FIELD(r.horizon,'5m','15m','1h','4h','1d');"
+```
+
+`GROUP BY s.scoring_version` 을 빼면 안 된다. 버전은 신호를 만들 때 엔진이 새기므로
+(`trading_engine/strategy/versioning.py`) 날짜를 찾아 넣을 필요가 없다.
 
 ## rsync 동기화 규칙
 

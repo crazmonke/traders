@@ -9,6 +9,10 @@
 
 적용 이력은 DB 안의 `schema_migrations` 테이블에 파일명으로 기록된다.
 
+> **수동으로 SQL 을 실행했다면 원장에도 넣어야 한다.** 안 넣으면 다음 `migrate.sh` 가
+> 그 파일을 다시 적용하려다 `Duplicate column` 으로 멈추고, 그 뒤 순번이 전부 밀린다.
+> `INSERT IGNORE INTO schema_migrations (filename) VALUES ('003_....sql');`
+
 ## 스키마를 바꿀 때
 
 `init.sql`을 고치지 말고 `migrations/`에 다음 순번 파일을 추가한다.

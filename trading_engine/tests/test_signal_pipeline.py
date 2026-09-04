@@ -425,3 +425,47 @@ async def test_signal_without_a_global_price_is_not_saved():
         evaluation, snapshot={**evaluation.snapshot, "price": None}
     )
     assert await signal_store.save_signal(without_price, ANALYSIS) is None
+
+
+# --- 배점 체계 버전 (적중률 통계가 섞이지 않게) ---------------------------------
+
+
+def test_every_signal_carries_the_scoring_version():
+    """버전 없이 저장하면 배점표를 고친 뒤 그 전후 신호를 나눌 방법이 사라진다.
+
+    날짜로 나누는 방식은 배점표를 또 고칠 때 새 날짜를 코드 곳곳에서 찾아 고쳐야 하고,
+    한 군데만 빠뜨려도 조용히 섞인다.
+    """
+    from trading_engine.strategy.versioning import SCORING_VERSION
+
+    columns = signal_store.INSERT_SQL.split("ai_signals (")[1].split(") VALUES")[0]
+    names = [c.strip() for c in columns.split(",") if c.strip()]
+    params = signal_store.build_params(make_evaluation(), ANALYSIS)
+
+    assert "scoring_version" in names
+    assert params[names.index("scoring_version")] == SCORING_VERSION
+
+
+def test_insert_placeholders_match_the_column_list():
+    """컬럼을 더하면서 %s 를 빼먹으면 모든 신호 저장이 런타임에 실패한다."""
+    columns = signal_store.INSERT_SQL.split("ai_signals (")[1].split(") VALUES")[0]
+    names = [c.strip() for c in columns.split(",") if c.strip()]
+
+    assert signal_store.INSERT_SQL.count("%s") == len(names)
+    assert len(signal_store.build_params(make_evaluation(), ANALYSIS)) == len(names)
+
+
+def test_scoring_version_fits_the_column():
+    """VARCHAR(8) 을 넘기면 INSERT 가 통째로 실패한다."""
+    from trading_engine.strategy import versioning
+
+    assert 0 < len(versioning.SCORING_VERSION) <= versioning.MAX_LENGTH
+
+
+def test_data_sources_json_also_records_the_version():
+    """컬럼이 없는 옛 행이나 덤프만 봐도 어떤 배점표였는지 알 수 있어야 한다."""
+    from trading_engine.strategy.versioning import SCORING_VERSION
+
+    sources = json.loads(signal_store.data_sources_json(make_evaluation(), ANALYSIS))
+
+    assert sources["scoring_version"] == SCORING_VERSION
