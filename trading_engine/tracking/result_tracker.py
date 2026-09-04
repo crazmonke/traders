@@ -58,7 +58,10 @@ BATCH_LIMIT = 500
 
 # 이보다 오래된 신호는 포기한다. 캔들을 못 받아오는 신호가 섞이면 배치가 매번 같은
 # 건에서 막혀 새 신호가 영영 평가되지 않는다.
-MAX_AGE_DAYS = 30
+#
+# **가장 긴 horizon(1M = 30일)보다 넉넉해야 한다.** 30 으로 두면 1M 신호가 평가
+# 가능해지는 시점과 버려지는 시점이 같아져 영영 기록되지 않는다.
+MAX_AGE_DAYS = 60
 
 PENDING_SQL = """
 SELECT s.id, s.symbol, s.signal_type, s.entry_price_global,

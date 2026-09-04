@@ -44,8 +44,20 @@ def test_backtest_uses_the_same_barriers():
 
 
 def test_horizons_match_the_database_enum():
-    """`ai_signal_results.horizon` ENUM(마이그레이션 005)과 같아야 한다."""
-    assert list(HORIZONS) == ["5m", "15m", "1h", "4h", "1d"]
+    """`ai_signal_results.horizon` ENUM 과 같아야 한다 (마이그레이션 005 · 008).
+
+    갈라지면 INSERT 가 통째로 실패하거나(없는 값), 잴 수 있는데 안 재게 된다.
+    """
+    assert list(HORIZONS) == ["5m", "15m", "1h", "4h", "1d", "1w", "1M"]
+
+
+def test_long_horizons_exist_for_the_trend_strategy():
+    """추세추종은 평균 23일을 들고 있는다. 최장 1일로는 잴 수 없다."""
+    from trading_engine.tracking.result_tracker import MAX_AGE_DAYS
+
+    assert HORIZONS["1M"] == 30 * 1440
+    # 평가 가능해지는 시점보다 포기 시점이 뒤여야 한다. 같으면 영영 기록되지 않는다.
+    assert MAX_AGE_DAYS * 1440 > HORIZONS["1M"]
 
 
 # --- 배리어 방향 ---------------------------------------------------------------

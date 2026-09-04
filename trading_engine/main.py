@@ -24,6 +24,7 @@ from trading_engine.market.exchange_registry import resolve_specs
 from trading_engine.market.market_manager import MarketManager, base_of
 from trading_engine.market.redis_store import RedisStore
 from trading_engine.strategy.signal_engine import SignalEngine
+from trading_engine.strategy import trend_runner
 from trading_engine.strategy.signal_pipeline import SignalPipeline
 from trading_engine.tracking import result_tracker
 
@@ -142,6 +143,14 @@ async def run() -> None:
     if settings.tracker_in_engine:
         tasks.append(result_tracker.run_forever(store))
         log.info("성과 추적 동거 실행 (TRACKER_IN_ENGINE=1, %d초 주기)", settings.tracker_interval_sec)
+
+    # 추세추종(2026-09-04 채택). 룰 엔진과 **완전히 다른 규칙**이라 별도 태스크로 돈다.
+    # `scoring_version` 이 달라 적중률 화면에서 자동으로 분리되고, 어느 쪽이 실제로
+    # 맞았는지 나란히 비교된다. 근거는 `strategy/trend.py` 첫머리.
+    if settings.trend_enabled:
+        tasks.append(trend_runner.run_forever(store))
+    else:
+        log.info("추세추종 비활성 (TREND_ENABLED=0)")
 
     # 거래소별로 독립된 태스크다. 하나가 죽어도 나머지는 계속 수집한다.
     running = asyncio.gather(*tasks)

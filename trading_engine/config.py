@@ -79,6 +79,10 @@ class Settings:
         "false",
         "",
     )
+    # 추세추종 판정 주기(초). 일봉은 하루 한 번 닫히므로 자주 볼 이유가 없다.
+    # 그래도 시간 단위로 도는 것은 재시작 뒤 그날 안에 다시 판정하기 위해서다.
+    trend_interval_sec: int = int(os.getenv("TREND_INTERVAL_SEC", "3600"))
+    trend_enabled: bool = os.getenv("TREND_ENABLED", "1").strip() not in ("0", "false", "")
     # 뉴스 수집 주기(초). RSS 는 분 단위로도 충분하고, 너무 잦으면 매체에 실례다.
     news_poll_sec: int = int(os.getenv("NEWS_POLL_SEC", "300"))
     fred_api_key: str | None = os.getenv("FRED_API_KEY") or None
