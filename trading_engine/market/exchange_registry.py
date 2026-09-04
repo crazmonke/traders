@@ -22,6 +22,15 @@ class ExchangeSpec:
     quote: str  # 견적통화. BTC/USDT 의 USDT
     supports_orderbook: bool = True
     is_private_trading_target: bool = False  # 자동매매 실행처 (업비트만 True)
+    # 한 번의 `fetch_ohlcv` 로 요청할 수 있는 최대 봉 수.
+    #
+    # **이 값을 넘겨 요청하면 조용히 틀린 데이터가 온다.** ccxt 의 upbit 구현은
+    # `since` 를 그대로 쓰지 않고 `to = since + limit × 봉길이` 를 계산해 거기서
+    # **뒤로** 가져오는데, 실제 상한은 200 이라 limit=1000 을 주면 앞의 800봉이
+    # 통째로 빠진 채 뒤쪽 200봉만 온다. 오류도 경고도 없다.
+    # (2026-09-04 실측: 업비트 1시간봉 14일 요청 → 336봉이어야 하는데 200봉,
+    #  그것도 시작이 5일 뒤였다.)
+    max_ohlcv_limit: int = 1000
 
     def symbol(self, base: str) -> str:
         """'BTC' → 'BTC/USDT' 처럼 거래소 표기로 바꾼다."""
@@ -38,7 +47,10 @@ REGISTRY: dict[str, ExchangeSpec] = {
     "okx": ExchangeSpec("okx", "OKX", "USDT"),
     "bybit": ExchangeSpec("bybit", "Bybit", "USDT"),
     "coinbase": ExchangeSpec("coinbase", "Coinbase", "USD"),
-    "upbit": ExchangeSpec("upbit", "Upbit", "KRW", is_private_trading_target=True),
+    # 업비트는 봉 요청 상한이 200 이다. 위 `max_ohlcv_limit` 주석 참고.
+    "upbit": ExchangeSpec(
+        "upbit", "Upbit", "KRW", is_private_trading_target=True, max_ohlcv_limit=200
+    ),
 }
 
 

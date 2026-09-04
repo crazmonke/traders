@@ -57,6 +57,9 @@ async def fetch_candles(
     """
     client = create_client(spec)
     symbol = spec.symbol(base)
+    # 거래소가 감당하는 만큼만 요청한다. 넘겨서 요청하면 거래소에 따라 **조용히
+    # 앞부분이 빠진 데이터가 온다** (`ExchangeSpec.max_ohlcv_limit` 주석 참고).
+    limit = min(FETCH_LIMIT, spec.max_ohlcv_limit)
     collected: list[dict[str, Any]] = []
     cursor = since_ms
 
@@ -64,7 +67,7 @@ async def fetch_candles(
         for _ in range(MAX_PAGES):
             if cursor >= until_ms:
                 break
-            rows = await client.fetch_ohlcv(symbol, timeframe, since=cursor, limit=FETCH_LIMIT)
+            rows = await client.fetch_ohlcv(symbol, timeframe, since=cursor, limit=limit)
             if not rows:
                 break
             page = [candle for candle in to_candles(rows) if candle["ts"] <= until_ms]

@@ -678,3 +678,31 @@ def test_wider_targets_beat_the_spec_defaults_on_the_same_signals():
 
     # 넓은 쪽이 거래 수가 적다 (익절·손절에 덜 걸린다)
     assert wide.total_trades <= narrow.total_trades
+
+
+# --- 거래소별 봉 요청 상한 (2026-09-04) ----------------------------------------
+
+
+def test_upbit_has_a_lower_ohlcv_limit():
+    """업비트는 200 이 상한이다. 넘겨 요청하면 **조용히 앞부분이 빠진** 데이터가 온다.
+
+    ccxt 의 upbit 구현은 `since` 를 그대로 쓰지 않고 `to = since + limit × 봉길이` 를
+    계산해 거기서 뒤로 가져온다. limit=1000 을 주면 앞의 800봉이 통째로 빠진다.
+    오류도 경고도 없어서, 백테스트가 구멍 난 데이터 위에서 돌고 있었다.
+    """
+    from trading_engine.market.exchange_registry import get_spec
+
+    assert get_spec("upbit").max_ohlcv_limit == 200
+    assert get_spec("binance").max_ohlcv_limit > 200
+
+
+def test_fetch_limit_is_capped_by_the_exchange():
+    """상한을 코드가 실제로 반영하는지. 상수만 두고 안 쓰면 의미가 없다."""
+    import inspect
+
+    from trading_engine.backtest import data as data_mod
+
+    source = inspect.getsource(data_mod.fetch_candles)
+
+    assert "spec.max_ohlcv_limit" in source
+    assert "limit=limit" in source
